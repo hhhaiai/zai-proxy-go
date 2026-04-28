@@ -1,0 +1,263 @@
+帮我分析下这个项目， 现在官方出了新的模型GLM-5，用curl请求 这样的
+
+匿名访问是这样的：
+
+curl 'https://chat.z.ai/api/v2/chat/completions?timestamp=1770904309131&requestId=46265489-a34d-4148-9a5b-93a5f8cfff6c&user_id=b818e160-988a-42d4-8485-c9e53fc47398&version=0.0.1&platform=web&token=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImI4MThlMTYwLTk4OGEtNDJkNC04NDg1LWM5ZTUzZmM0NzM5OCIsImVtYWlsIjoiR3Vlc3QtMTc3MDkwNDI1ODY1NUBndWVzdC5jb20ifQ.V5KzAwT24QODM0vgKZKy8ExaFYVDTepz8hbOsedr2OsWdmb3W7T1csjUIvz3rbjblgJbqctRXFGwz744eYStIg&user_agent=Mozilla%2F5.0+%28Macintosh%3B+Intel+Mac+OS+X+10_15_7%29+AppleWebKit%2F537.36+%28KHTML%2C+like+Gecko%29+Chrome%2F144.0.0.0+Safari%2F537.36&language=en-US&languages=en-US&timezone=Asia%2FShanghai&cookie_enabled=true&screen_width=2048&screen_height=1280&screen_resolution=2048x1280&viewport_height=439&viewport_width=1441&viewport_size=1441x439&color_depth=24&pixel_ratio=2&current_url=https%3A%2F%2Fchat.z.ai%2Fc%2F5f83c9da-a519-4c47-ada8-53360c1dea6b&pathname=%2Fc%2F5f83c9da-a519-4c47-ada8-53360c1dea6b&search=&hash=&host=chat.z.ai&hostname=chat.z.ai&protocol=https%3A&referrer=&title=Z.ai+-+Free+AI+Chatbot+%26+Agent+powered+by+GLM-5+%26+GLM-4.7&timezone_offset=-480&local_time=2026-02-12T13%3A51%3A49.144Z&utc_time=Thu%2C+12+Feb+2026+13%3A51%3A49+GMT&is_mobile=false&is_touch=false&max_touch_points=0&browser_name=Chrome&os_name=Mac+OS&signature_timestamp=1770904309131' \
+  -H 'Accept: */*' \
+  -H 'Accept-Language: en-US' \
+  -H 'Authorization: Bearer eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImI4MThlMTYwLTk4OGEtNDJkNC04NDg1LWM5ZTUzZmM0NzM5OCIsImVtYWlsIjoiR3Vlc3QtMTc3MDkwNDI1ODY1NUBndWVzdC5jb20ifQ.V5KzAwT24QODM0vgKZKy8ExaFYVDTepz8hbOsedr2OsWdmb3W7T1csjUIvz3rbjblgJbqctRXFGwz744eYStIg' \
+  -H 'Connection: keep-alive' \
+  -H 'Content-Type: application/json' \
+  -b 'cdn_sec_tc=2ff617a217709042579737795e0b7138f2ac4aa7f68b53090e711e8ea9; acw_tc=0a094e7317709042580631636e3fd1b4d2d68a43a8d5fffaff6aac3b80ff49; token=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImI4MThlMTYwLTk4OGEtNDJkNC04NDg1LWM5ZTUzZmM0NzM5OCIsImVtYWlsIjoiR3Vlc3QtMTc3MDkwNDI1ODY1NUBndWVzdC5jb20ifQ.V5KzAwT24QODM0vgKZKy8ExaFYVDTepz8hbOsedr2OsWdmb3W7T1csjUIvz3rbjblgJbqctRXFGwz744eYStIg; _gcl_au=1.1.756174603.1770904259; _ga=GA1.1.1741578339.1770904259; _ga_Z8QTHYBHP3=GS2.1.s1770904259$o1$g1$t1770904308$j11$l0$h0; ssxmod_itna=1-Yq_xgDuD0i3iwRD4MDKqWTxWI2gDmxBP018D_xQy508D6QDB44QxG=_eDym5ZQWLdbY4YYQeDseUebqDy8xA3DTPfpqDBA77=zHWbYgGCKQtB2c0OTSxjqeKbILZcx5=w=114jTfi2pwWY0iKYeD8b_3DYEIDGt=DG6iU3mIi2t410t54rLxAei_YBftWDh8Bnhxl4xeU0Dg9bh8U355UDchSCH6DDfh77Yw8Ye5joeDt4GyWKGuGWqDDh23GObhqQkxc4hC/gN85qBh9E5y_7XC4gaqicMQ91DqeD; ssxmod_itna2=1-Yq_xgDuD0i3iwRD4MDKqWTxWI2gDmxBP018D_xQy508D6QDB44QxG=_eDym5ZQWLdbY4YYe4DWhiQ7G4e3uaq03iiYP2p1qD0v4EzrGAMyLt9bGQ_CH9IT8dLdy8B1CUUs1ajwSHgtB=nmudnR8LFYD6EmqrXBwrD0r3xgfP/DwdXlRDPKwRubuh89_XlmMbVDPTap352jRnMzMrUUYiZ940ahT3Dr7Wexn9sNmUN6Q=2iQ6QX=A2YmGIHzDeQTRFCTUKzTkUYS=S9K6FKFQjZaFTPwtT=wkTuOLEFtjgOInoTP6nxZTnCexGIWU0ADYUGcweYGBc9YuPWivjaZ9u6mqqV5OfxknafBuvjcvipZKEOj47QO8KpIA_lFIwechmmm7eFSpXeY_lDa/77eAxYyPevD1Dz/rf3iGenLjADNALKYm8K7iDmtWY5Ftxe=LesQyhiuv7gPQqdHi=ewnmR_/q8znzjb_baFImyIvkKG16IkCuPUGThc0/KgzMO3c_QYqwqTuqxGek8vGy49/3jedORrptAhQLIT9h_MaRQA2SaWGbCDx3SiemLARq8plBFrseiIW4m6kur6qkrNwH/LGfhHfxvtThmMX_FvI=mFm8SPqCfk1UzCqrjSjyZaf2_GmxtzdLZWW=kBFqQDGGGkCi7RZm_GSa0c5Gx4hNSiULsH80Dz5mm5PiAtwnwVQD0wxCt4mDN6KB/zi5W5BxtEZ_Dad5z0Tu/jNPiDD' \
+  -H 'DNT: 1' \
+  -H 'Origin: https://chat.z.ai' \
+  -H 'Referer: https://chat.z.ai/c/5f83c9da-a519-4c47-ada8-53360c1dea6b' \
+  -H 'Sec-Fetch-Dest: empty' \
+  -H 'Sec-Fetch-Mode: cors' \
+  -H 'Sec-Fetch-Site: same-origin' \
+  -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36' \
+  -H 'X-FE-Version: prod-fe-1.0.237' \
+  -H 'X-Signature: 21ffad7b70329adb9d6509aa066cf74b0d0b865d470c3e4e600b9734ae7fdd4a' \
+  -H 'sec-ch-ua: "Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "macOS"' \
+  --data-raw '{"stream":true,"model":"glm-5","messages":[{"role":"user","content":"hi"}],"signature_prompt":"hi","params":{},"extra":{},"mcp_servers":["advanced-search"],"features":{"image_generation":false,"web_search":false,"auto_web_search":true,"preview_mode":true,"flags":[],"enable_thinking":true},"variables":{"{{USER_NAME}}":"Guest-1770904258655","{{USER_LOCATION}}":"Unknown","{{CURRENT_DATETIME}}":"2026-02-12 21:51:49","{{CURRENT_DATE}}":"2026-02-12","{{CURRENT_TIME}}":"21:51:49","{{CURRENT_WEEKDAY}}":"Thursday","{{CURRENT_TIMEZONE}}":"Asia/Shanghai","{{USER_LANGUAGE}}":"en-US"},"chat_id":"5f83c9da-a519-4c47-ada8-53360c1dea6b","id":"cec5f911-710b-40e0-b888-5112a925025b","current_user_message_id":"d0026002-3e2d-4784-a658-14d24937b4d5","current_user_message_parent_id":null,"background_tasks":{"title_generation":true,"tags_generation":true}}'
+
+
+回复
+
+data: {"type":"chat:completion","data":{"delta_content":"Let me consider how to","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" respond to this greeting effectively","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":".\n\nThe user has initiated","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" contact with a simple \"","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":"hi\", which suggests they","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" may be testing the waters","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" or just starting the conversation","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":". This calls for a","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" warm and inviting response that","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" encourages further interaction.\n\nA","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" friendly greeting would be appropriate","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" here, coupled with an","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" open-ended approach to invite","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" their input. It's","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" important to create a welcoming","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" atmosphere where they feel comfortable","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" expressing their needs or questions","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":".\n\nI should also keep","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" the response concise and natural","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":", avoiding overly formal language","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":". The goal is to","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" make them feel at ease","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" while leaving the door open","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" for them to steer the","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" conversation in whichever direction they","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" prefer.\n\nPerhaps I could","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" add an element of helpful","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":"ness by explicitly offering assistance","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":". This would not only","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" acknowledge their greeting but also","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" establish my role as a","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" supportive presence in our conversation","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":".\n\nThe response should strike","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" a balance between being approach","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":"able and professional, setting","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" a positive tone for any","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" follow-up interactions they may","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" want to have.","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":"Hi there! I'm","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" the GLM language model","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" trained by Z.ai.","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" How can I assist you","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" today? Whether you have","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" questions, need information,","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" or just want to chat","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":", I'm here to","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" help. What would you","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"phase":"other","usage":{"prompt_tokens":6,"completion_tokens":240,"total_tokens":246,"prompt_tokens_details":{}}}}
+
+data: {"type":"chat:completion","data":{"delta_content":" like to discuss?","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"phase":"done","done":true}}
+
+
+
+----------------------------
+
+实名认证后的访问
+
+curl 'https://chat.z.ai/api/v2/chat/completions?timestamp=1770904458239&requestId=6ddbdb39-3a15-48ad-8add-35e917e729e0&user_id=49e58e39-b56f-4ba7-a386-ddf230ee7503&version=0.0.1&platform=web&token=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjQ5ZTU4ZTM5LWI1NmYtNGJhNy1hMzg2LWRkZjIzMGVlNzUwMyIsImVtYWlsIjoiYW5hbHlzeXMuY25AZ21haWwuY29tIn0.UYvDZaBsNIn7NaTwC2EU_bGS4BLtlosW_A0n_cBLXUYUVG_4txHyDgit1sFrdOdAERphQlfpFd-hmYH34hFSwg&user_agent=Mozilla%2F5.0+%28Macintosh%3B+Intel+Mac+OS+X+10_15_7%29+AppleWebKit%2F537.36+%28KHTML%2C+like+Gecko%29+Chrome%2F144.0.0.0+Safari%2F537.36&language=en-US&languages=en-US%2Czh-CN&timezone=Asia%2FShanghai&cookie_enabled=true&screen_width=2048&screen_height=1280&screen_resolution=2048x1280&viewport_height=439&viewport_width=1441&viewport_size=1441x439&color_depth=24&pixel_ratio=2&current_url=https%3A%2F%2Fchat.z.ai%2Fc%2F79b6e52b-0ebe-41f1-b6ef-9a0f8b61e964&pathname=%2Fc%2F79b6e52b-0ebe-41f1-b6ef-9a0f8b61e964&search=&hash=&host=chat.z.ai&hostname=chat.z.ai&protocol=https%3A&referrer=&title=%E6%96%B0%E8%81%8A%E5%A4%A9+%7C+Z.ai+-+Free+AI+Chatbot+%26+Agent+powered+by+GLM-5+%26+GLM-4.7&timezone_offset=-480&local_time=2026-02-12T13%3A54%3A18.239Z&utc_time=Thu%2C+12+Feb+2026+13%3A54%3A18+GMT&is_mobile=false&is_touch=false&max_touch_points=0&browser_name=Chrome&os_name=Mac+OS&signature_timestamp=1770904458239' \
+  -H 'Accept: */*' \
+  -H 'Accept-Language: zh-CN' \
+  -H 'Authorization: Bearer eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjQ5ZTU4ZTM5LWI1NmYtNGJhNy1hMzg2LWRkZjIzMGVlNzUwMyIsImVtYWlsIjoiYW5hbHlzeXMuY25AZ21haWwuY29tIn0.UYvDZaBsNIn7NaTwC2EU_bGS4BLtlosW_A0n_cBLXUYUVG_4txHyDgit1sFrdOdAERphQlfpFd-hmYH34hFSwg' \
+  -H 'Connection: keep-alive' \
+  -H 'Content-Type: application/json' \
+  -b '_ga=GA1.1.1917271541.1746600506; _c_WBKFRo=tTTIciozoGq0PseQ63X24QQG3MBEfIGmFiP6kQ1x; _gcl_au=1.1.397686971.1769410442; sensorsdata2015jssdkcross=%7B%22distinct_id%22%3A%2219957a403fd378-0260382fc231dda-1f525631-4953600-19957a403fe1056%22%2C%22first_id%22%3A%22%22%2C%22props%22%3A%7B%22%24latest_traffic_source_type%22%3A%22%E8%87%AA%E7%84%B6%E6%90%9C%E7%B4%A2%E6%B5%81%E9%87%8F%22%2C%22%24latest_search_keyword%22%3A%22%E6%9C%AA%E5%8F%96%E5%88%B0%E5%80%BC%22%2C%22%24latest_referrer%22%3A%22https%3A%2F%2Fwww.google.com%2F%22%2C%22%24latest_utm_source%22%3A%22z.ai-chat-en%22%2C%22%24latest_utm_medium%22%3A%22popup%22%2C%22%24latest_utm_campaign%22%3A%22Platform_Ops%22%2C%22%24latest_utm_term%22%3A%22glm-coding-plan%22%2C%22%24latest_utm_content%22%3A%22glm-coding-plan%22%7D%2C%22identities%22%3A%22eyIkaWRlbnRpdHlfY29va2llX2lkIjoiMTk5NTdhNDAzZmQzNzgtMDI2MDM4MmZjMjMxZGRhLTFmNTI1NjMxLTQ5NTM2MDAtMTk5NTdhNDAzZmUxMDU2In0%3D%22%2C%22history_login_id%22%3A%7B%22name%22%3A%22%22%2C%22value%22%3A%22%22%7D%7D; sensorsdata2015jssdksession=%7B%22session_id%22%3A%2219c0529cf8510a40e44e196ca697d81b525631262144019c0529cf8616b9%22%2C%22first_session_time%22%3A1769613152132%2C%22latest_session_time%22%3A1769613988941%7D; _ga_9HHB4R5K1T=GS2.1.s1769613146$o2$g1$t1769613989$j60$l0$h0; cdn_sec_tc=2ff6179917709033349834609e38e237297e5182d9a5cfbaaa53451662; acw_tc=0a0f6b9417709033350824686e481eca2affd56dab8eb2a6dd678a8e6e029c; token=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjQ5ZTU4ZTM5LWI1NmYtNGJhNy1hMzg2LWRkZjIzMGVlNzUwMyIsImVtYWlsIjoiYW5hbHlzeXMuY25AZ21haWwuY29tIn0.UYvDZaBsNIn7NaTwC2EU_bGS4BLtlosW_A0n_cBLXUYUVG_4txHyDgit1sFrdOdAERphQlfpFd-hmYH34hFSwg; _ga_Z8QTHYBHP3=GS2.1.s1770903337$o59$g1$t1770904457$j7$l0$h0; ssxmod_itna=1-iq_xgDBDRAi=3BKPYjueQq8D3LOD9GDBP01kD_xQ5DODLxn_4GdHResL_eiiD07nkG0K=YnTHNPSD05hK_9D06HDf40W_z=D22k/3FjOeqeeEYY42Ck3m0RxHQjerwyhNXa649P89LH1Zjnr3xiTTD07DmWWDiyKD0IYwea3dEm4qCgD_iBYcr0PeGGxqnuPs0gDteSPzDrOynTYiQiqEfTvSzeDihWj5=bxsY4D5x0k5q0OiUxDG0Y_RQEtUoBcq3RPblxGn8G9S0uNxOM43lExGQGeNAL4KYD; ssxmod_itna2=1-iq_xgDBDRAi=3BKPYjueQq8D3LOD9GDBP01kD_xQ5DODLxn_4GdHResL_eiiD07nkG0K=YnTHNP_DDpYP5oGA5GaQi7SpNK8DGNfXUS2MnLe8nwL4RTd06Y9LF1w78qSHW0Zw8o7rsg49UwDUUB3Y/G6xCwjMiLQf/D=0fuNUAm3qXl3fe8uERe=fSe_daMfxU7uLbl_ooYi5=a6Fs=2KjQKSi=dU37f7Ki242=ILCc6XQ0RN0=T4w83cizvclW6vgSf7m9DKsxHlnKWRSra0eIDh5AWnEdaRKihPqx7504xUlx7l0Swnbe7IK8GDVjn9tIfiB0F7fK5pi9A7THmB=S4y4eG9WSbWkzrxkPhmYRzrGIKhDTIKKpt9m4WdXW_KBp0c2RqI7u=dTU4W93g8YOSIB7A4xzR7_um0Kk/5dHovjmevvf4nNp5HAudKm9f3xBa8QAIWqKse0GoWZnHtIYoH8qLAzM7zr6zA0nB7qna5Oz8AfmBDAYgGiHGfrhk9ATvSRRSn_37IA8kuuYdL_c5gne1IoUWqqYCkqCwoSW9uAaiK8v0Ww5LIrourcfnKAYUDeDQb8eaj4Fj=hdwWfbvBda80G2_5t/53pHLw2XDRai/Qb1my2dq_Feukicsz7WY2yZuH54l114V9v4gcKBvKrAz9qwx8NUY_YShHMhmlbqW7enIKl4Dx8KQX75zmNBqehrioYD8T5BhsYYDjPYSjNdjxeheWxeD' \
+  -H 'DNT: 1' \
+  -H 'Origin: https://chat.z.ai' \
+  -H 'Referer: https://chat.z.ai/c/79b6e52b-0ebe-41f1-b6ef-9a0f8b61e964' \
+  -H 'Sec-Fetch-Dest: empty' \
+  -H 'Sec-Fetch-Mode: cors' \
+  -H 'Sec-Fetch-Site: same-origin' \
+  -H 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36' \
+  -H 'X-FE-Version: prod-fe-1.0.237' \
+  -H 'X-Signature: 97670d72c4a0ea7b4dbd13562b879bf2ba9d5f7b1df1f28087b6bd080dbac5b4' \
+  -H 'sec-ch-ua: "Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "macOS"' \
+  --data-raw '{"stream":true,"model":"glm-5","messages":[{"role":"user","content":"hi"}],"signature_prompt":"hi","params":{},"extra":{},"mcp_servers":["advanced-search"],"features":{"image_generation":false,"web_search":false,"auto_web_search":true,"preview_mode":true,"flags":[],"enable_thinking":true},"variables":{"{{USER_NAME}}":"薛涵","{{USER_LOCATION}}":"Unknown","{{CURRENT_DATETIME}}":"2026-02-12 21:54:18","{{CURRENT_DATE}}":"2026-02-12","{{CURRENT_TIME}}":"21:54:18","{{CURRENT_WEEKDAY}}":"Thursday","{{CURRENT_TIMEZONE}}":"Asia/Shanghai","{{USER_LANGUAGE}}":"zh-CN"},"chat_id":"79b6e52b-0ebe-41f1-b6ef-9a0f8b61e964","id":"2d6d6f30-4494-4e32-a8cd-a6fb0f48de57","current_user_message_id":"54af368e-da10-4750-b2a0-be0a07600c47","current_user_message_parent_id":null,"background_tasks":{"title_generation":true,"tags_generation":true}}'
+
+
+
+data: {"type":"chat:completion","data":{"delta_content":"Let me consider how to","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" respond to this greeting effectively","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":".\n\nThe user has initiated","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" contact with a simple \"","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":"hi,\" which suggests they","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" may be testing the waters","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" or just starting the conversation","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":". This calls for a","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" warm, inviting response that","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" encourages further interaction.\n\nI","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" should acknowledge their greeting in","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" a friendly way and make","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" them feel welcome to share","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" more about what they need","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" help with. Since they","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" haven't specified any particular","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" topic or question, it","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" would be appropriate to keep","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" the response open-ended and","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" inviting.\n\nA good approach","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" would be to return the","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" greeting warmly and express readiness","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" to assist. I could","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" also gently prompt them to","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" share what's on their","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" mind or what kind of","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" help they're looking for","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":". This shows both hospitality","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" and willingness to engage meaning","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":"fully.\n\nThe tone should","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" be approachable and professional","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":", but not overly formal","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":". After all, this","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" seems to be the beginning","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" of what could be a","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" helpful conversation.\n\nLet me","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" craft a response that's","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" welcoming and open, inviting","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" them to continue the dialogue","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" while keeping it natural and","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" conversational.","phase":"thinking"}}
+
+data: {"type":"chat:completion","data":{"delta_content":"Hi there! I'm","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" the GLM language model","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" trained by Z.ai.","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" How can I assist you","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" today? Whether you have","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" questions, need information,","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" or just want to chat","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":", I'm here to","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"delta_content":" help. What would you","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"phase":"other","usage":{"prompt_tokens":6,"completion_tokens":254,"total_tokens":260,"prompt_tokens_details":{}}}}
+
+data: {"type":"chat:completion","data":{"delta_content":" like to discuss?","phase":"answer"}}
+
+data: {"type":"chat:completion","data":{"phase":"done","done":true}}
+

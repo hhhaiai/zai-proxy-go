@@ -1,0 +1,34 @@
+# Git files
+.git
+.github
+.gitignore
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+*.exe
+*.cmd
+zai-proxy
+
+# Documentation
+README.md
+*.md
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker files
+Dockerfile
+.dockerignore
+docker-compose.yml
