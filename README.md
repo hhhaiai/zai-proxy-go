@@ -35,22 +35,17 @@ docker-compose up -d
 ### 本地运行
 
 ```bash
-# 克隆项目
 git clone https://github.com/hhhaiai/zai-proxy-go.git
 cd zai-proxy-go
-
-# 安装依赖
 go mod download
-
-# 运行服务
 go run main.go
 ```
 
 ## 使用方法
 
-### 匿名模式（免登录）
+### 1. 匿名模式（免登录）
 
-使用 `free` 作为 API key：
+使用 `free` 作为 API key，服务会自动获取匿名 token 并处理验证码：
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -62,7 +57,7 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-### Claude Code 集成
+### 2. Claude Code 集成
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8000
@@ -70,7 +65,13 @@ export ANTHROPIC_API_KEY=free
 claude
 ```
 
-### 使用个人 Token
+### 3. 使用个人 Token
+
+1. 登录 https://chat.z.ai
+2. 打开浏览器开发者工具 (F12)
+3. 切换到 Application/Storage 标签
+4. 在 localStorage 中找到 `token` 字段
+5. 复制其值作为 API 调用的 Authorization
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -83,17 +84,41 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+### 4. Token 管理器
+
+配置多个 Token 进行轮询：
+
+```bash
+# .env 文件
+ZAI_STATIC_TOKENS=token1,token2,token3
+ZAI_STRATEGY=round_robin
+ZAI_ENABLE_ANONYMOUS=true
+```
+
+使用 `managed` 关键字触发 Token 管理器：
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer managed" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "GLM-5.1",
+    "messages": [{"role": "user", "content": "hello"}]
+  }'
+```
+
 ## 支持的模型
 
-| 模型 | 匿名可用 | 说明 |
-|------|----------|------|
-| GLM-4.5 | ✓ | |
-| GLM-4.6 | ✓ | |
-| GLM-4.7 | ✓ | 默认模型 |
-| GLM-5 | ✗ | 需要登录 |
-| GLM-5.1 | ✗ | 需要登录 |
-| GLM-4.5-V | ✓ | 多模态 |
-| GLM-4.6-V | ✓ | 多模态 |
+| 模型名称 | 匿名可用 | 登录可用 |
+|----------|----------|----------|
+| GLM-4.5 | ✓ | ✓ |
+| GLM-4.6 | ✓ | ✓ |
+| GLM-4.7 | ✓ | ✓ |
+| GLM-5 | ✗ | ✓ |
+| GLM-5.1 | ✗ | ✓ |
+| GLM-4.5-V | ✓ | ✓ |
+| GLM-4.6-V | ✓ | ✓ |
+| GLM-4.5-Air | ✓ | ✓ |
 
 支持后缀标签：`-thinking`（思考模式）、`-search`（联网搜索）
 
@@ -124,6 +149,74 @@ curl http://localhost:8000/v1/tokens/stats
 
 # 浏览器池状态
 curl http://localhost:8000/browser/status
+```
+
+## 使用示例
+
+### curl 测试
+
+```bash
+# 基础请求
+curl http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer free" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "GLM-4.7",
+    "messages": [{"role": "user", "content": "hello"}],
+    "stream": true
+  }'
+
+# 使用思考模式
+curl http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer free" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "GLM-4.7-thinking",
+    "messages": [{"role": "user", "content": "hello"}],
+    "stream": true
+  }'
+
+# 使用联网搜索
+curl http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer free" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "GLM-4.7-search",
+    "messages": [{"role": "user", "content": "hello"}],
+    "stream": true
+  }'
+```
+
+### Anthropic Messages API
+
+```bash
+curl http://localhost:8000/v1/messages \
+  -H "x-api-key: free" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-opus-4-6",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "hello"}],
+    "stream": true
+  }'
+```
+
+### 多模态请求
+
+```json
+{
+  "model": "GLM-4.6-V",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "描述这张图片"},
+        {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}
+      ]
+    }
+  ]
+}
 ```
 
 ## 架构说明

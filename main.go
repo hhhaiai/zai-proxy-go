@@ -45,8 +45,6 @@ func main() {
 	http.HandleFunc("/v1/tokens/add", internal.HandleTokenAdd)
 	http.HandleFunc("/v1/tokens/stats", internal.HandleTokenStats)
 
-	// Captcha (for manual fallback)
-
 	// Browser pool status
 	http.HandleFunc("/browser/status", bp.HandleStatus)
 

@@ -6,3 +6,5 @@
 *.cmd
 node_modules
 zai-proxy
+*.log
+tmp/

@@ -33,5 +33,4 @@ COPY --from=builder /app/zai-proxy .
 
 EXPOSE 8000
 
-# Run with minimal resource limits
 CMD ["./zai-proxy"]
