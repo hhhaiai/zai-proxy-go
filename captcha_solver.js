@@ -2,167 +2,118 @@ const puppeteer = require('puppeteer-core');
 
 const CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const ZAI_URL = 'https://chat.z.ai';
-const USE_HEADLESS = process.argv.includes('--no-headless') ? false : 'new';
+
+const MESSAGE = process.argv.find(a => a.startsWith('--msg='))?.slice(6) || '';
 
 async function solveCaptcha() {
     let browser;
     try {
         browser = await puppeteer.launch({
             executablePath: CHROME_PATH,
-            headless: USE_HEADLESS,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--window-size=1280,720',
-                '--disable-blink-features=AutomationControlled',
-            ]
+            headless: 'new',
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
+                   '--window-size=1280,720', '--disable-blink-features=AutomationControlled'],
         });
 
         const page = await browser.newPage();
-        await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36');
+        await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.000 Safari/537.36');
 
-        // CDP Fetch interception
-        const client = await page.target().createCDPSession();
-
-        let securityToken = '';
-        let certifyId = '';
-        let verifyResponse = null;
-
-        await client.send('Fetch.enable', {
-            patterns: [
-                { urlPattern: '*captcha-open*', requestStage: 'Response' },
-                { urlPattern: '*VerifyCaptcha*', requestStage: 'Response' },
-                { urlPattern: '*InitCaptcha*', requestStage: 'Response' },
-            ]
-        });
-
-        client.on('Fetch.requestPaused', async (params) => {
-            const url = params.request.url;
-            try {
-                const response = await client.send('Fetch.getResponseBody', {
-                    requestId: params.requestId
-                });
-
-                let text = response.body;
-                if (response.base64Encoded) {
-                    text = Buffer.from(text, 'base64').toString('utf-8');
-                }
-
-                try {
-                    const json = JSON.parse(text);
-                    if (json.Result && json.Result.securityToken) {
-                        securityToken = json.Result.securityToken;
-                        certifyId = json.Result.certifyId || '';
-                        verifyResponse = json;
-                        process.stderr.write(`[FETCH] *** Got securityToken! certifyId=${certifyId} ***\n`);
-                    }
-                    if (json.CertifyId) {
-                        certifyId = json.CertifyId;
-                    }
-                } catch(e) {}
-            } catch (e) {}
-
-            try {
-                await client.send('Fetch.continueRequest', { requestId: params.requestId });
-            } catch (e) {}
-        });
-
-        // Step 1: Load chat.z.ai
-        process.stderr.write('[*] Loading chat.z.ai...\n');
+        // Load page
+        process.stderr.write('[*] Loading...\n');
         await page.goto(ZAI_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-        process.stderr.write('[+] Page loaded\n');
+        await new Promise(r => setTimeout(r, 3000));
 
-        // Step 2: Wait
-        await new Promise(r => setTimeout(r, 5000));
-
-        // Step 3: Get token
         const token = await page.evaluate(() => localStorage.getItem('token') || '');
-        process.stderr.write(`[+] Token: ${token ? 'yes' : 'none'}\n`);
-
-        // Step 4: Intercept the fetch API to capture the captcha_verify_param
-        // that the browser builds, and also intercept the chat request
-        await page.evaluate(() => {
-            window.__captchaVerifyParam = '';
-            window.__chatRequestCaptured = false;
-
-            const origFetch = window.fetch;
-            window.fetch = async function(...args) {
-                const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
-
-                // Intercept chat completion requests
-                if (url.includes('/api/v2/chat/completions')) {
-                    try {
-                        const body = args[1]?.body;
-                        if (body) {
-                            const parsed = JSON.parse(body);
-                            if (parsed.captcha_verify_param) {
-                                window.__captchaVerifyParam = parsed.captcha_verify_param;
-                                console.log('[INTERCEPT] Captured captcha_verify_param');
-                            }
-                        }
-                    } catch(e) {}
-                }
-
-                return origFetch.apply(this, args);
-            };
-        });
-
-        // Step 5: Type and send to trigger captcha
-        process.stderr.write('[*] Typing and sending message...\n');
-        const textarea = await page.$('textarea');
-        if (textarea) {
-            await textarea.click();
-            await textarea.type('test', { delay: 100 });
-            await new Promise(r => setTimeout(r, 500));
-            await page.keyboard.press('Enter');
-            process.stderr.write('[*] Message sent\n');
-        }
-
-        // Step 6: Wait for captcha
-        process.stderr.write('[*] Waiting for captcha (45s)...\n');
-        await new Promise(r => setTimeout(r, 45000));
-
-        // Step 7: Get the captured captcha_verify_param from the browser
-        const capturedParam = await page.evaluate(() => window.__captchaVerifyParam || '');
-        process.stderr.write(`[+] Captured param from browser: ${capturedParam ? capturedParam.substring(0, 30) + '...' : 'none'}\n`);
-
-        // Step 8: Also build from CDP-captured securityToken
-        let cdpParam = '';
-        if (securityToken) {
-            const verifyData = {
-                certifyId: certifyId,
-                sceneId: 'didk33e0',
-                isSign: true,
-                securityToken: securityToken
-            };
-            cdpParam = Buffer.from(JSON.stringify(verifyData)).toString('base64');
-            process.stderr.write(`[+] CDP param: ${cdpParam.substring(0, 30)}...\n`);
-        }
-
-        // Use whichever param we got
-        const captchaVerifyParam = capturedParam || cdpParam;
-
-        // Step 9: Get cookies
         const cookies = await page.cookies();
         const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
 
-        // Output
-        const result = {
-            token: token,
-            securityToken: securityToken,
-            certifyId: certifyId,
-            captchaVerifyParam: captchaVerifyParam,
-            cookies: cookieStr,
-            hasToken: !!token,
-            hasSecurityToken: !!securityToken,
-            hasCaptchaParam: !!captchaVerifyParam,
-            source: capturedParam ? 'browser-intercept' : (cdpParam ? 'cdp' : 'none'),
-        };
+        if (!MESSAGE) {
+            process.stdout.write(JSON.stringify({
+                token, securityToken: '', certifyId: '', captchaVerifyParam: '',
+                cookies: cookieStr, hasToken: !!token, hasSecurityToken: false,
+                hasCaptchaParam: false, source: 'browser-session'
+            }) + '\n');
+            return;
+        }
 
-        process.stderr.write(`[+] Result: token=${!!token}, securityToken=${!!securityToken}, captchaParam=${!!captchaVerifyParam}\n`);
-        process.stdout.write(JSON.stringify(result) + '\n');
+        // Send message
+        process.stderr.write(`[*] Sending: "${MESSAGE}"\n`);
+        const textarea = await page.$('#chat-input') || await page.$('textarea');
+        if (!textarea) throw new Error('No textarea');
+
+        await textarea.click();
+        await textarea.type(MESSAGE, { delay: 30 });
+        await new Promise(r => setTimeout(r, 300));
+        await page.keyboard.press('Enter');
+        process.stderr.write('[*] Sent, polling...\n');
+
+        // Poll for response completion (page text stabilizes)
+        let prevLen = 0;
+        let stableCount = 0;
+        for (let i = 0; i < 240; i++) { // 120s max
+            await new Promise(r => setTimeout(r, 500));
+            const len = await page.evaluate(() => document.body.innerText.length);
+            if (len === prevLen) {
+                stableCount++;
+                if (stableCount >= 8) break; // 4 seconds stable
+            } else {
+                stableCount = 0;
+            }
+            prevLen = len;
+        }
+
+        // Extract: get all text, find content between user message and disclaimer
+        const answer = await page.evaluate((userMsg) => {
+            const body = document.body.innerText;
+            const lines = body.split('\n').map(l => l.trim()).filter(l => l);
+
+            // Find the last occurrence of the user message
+            let lastUserIdx = -1;
+            for (let i = lines.length - 1; i >= 0; i--) {
+                if (lines[i] === userMsg || lines[i].includes(userMsg)) {
+                    lastUserIdx = i;
+                    break;
+                }
+            }
+
+            if (lastUserIdx === -1) return '';
+
+            // Collect lines after user message until footer
+            const answerLines = [];
+            for (let i = lastUserIdx + 1; i < lines.length; i++) {
+                const line = lines[i];
+                const lower = line.toLowerCase();
+                // Stop at footer/disclaimer
+                if (line.includes('以上内容均由AI生成')) break;
+                if (line.includes('技术博客')) break;
+                if (line.includes('联系我们')) break;
+                if (line.includes('用户协议')) break;
+                if (line.includes('隐私政策')) break;
+                if (lower.includes('有什么我能帮')) break;
+                if (lower === 'new chat') break;
+                if (line.includes('Regenerate') || line.includes('Copy') || line.includes('Like') || line.includes('Dislike')) {
+                    // UI buttons, skip
+                    continue;
+                }
+                answerLines.push(line);
+            }
+
+            return answerLines.join('\n').trim();
+        }, MESSAGE);
+
+        // Clean up: the actual answer is the last line/paragraph (thinking comes before it)
+        let cleanAnswer = answer;
+        const lines = answer.split('\n').filter(l => l.trim());
+        if (lines.length > 1) {
+            // Last line is typically the actual response
+            cleanAnswer = lines[lines.length - 1].trim();
+        }
+
+        process.stderr.write(`[+] Answer: ${cleanAnswer.length} chars (raw: ${answer.length})\n`);
+        process.stdout.write(JSON.stringify({
+            token, answer: cleanAnswer, cookies: cookieStr,
+            hasToken: !!token, hasAnswer: !!cleanAnswer, source: 'page-extract'
+        }) + '\n');
 
     } catch (error) {
         process.stderr.write(`[ERROR] ${error.message}\n`);

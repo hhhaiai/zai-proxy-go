@@ -180,8 +180,12 @@ func (tm *TokenManager) GetNextToken() (string, error) {
 	// 更新使用统计
 	tm.updateUsage(tokenInfo)
 
-	// 如果是匿名源，动态获取实际token
+	// 如果是匿名源，优先使用缓存的 session token（与 captcha 同一浏览器会话）
 	if tokenInfo.Source == SourceAnonymous {
+		if session := GetCaptchaSession(); session != nil {
+			LogDebug("[TokenManager] Using cached session token")
+			return session.Token, nil
+		}
 		return GetAnonymousToken()
 	}
 

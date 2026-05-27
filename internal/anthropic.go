@@ -249,10 +249,10 @@ func HandleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	msgID := fmt.Sprintf("msg_%s", uuid.New().String()[:24])
 
-	// For anonymous mode, route through browser proxy (same as OpenAI endpoint)
+	// For anonymous mode: use Puppeteer browser (handles captcha automatically)
 	if isAnonymous {
-		LogInfo("[Anthropic] Anonymous mode, routing through browser proxy")
-		handleAnthropicViaBrowserProxy(w, messages, msgID, clientModel, req.Stream, req.MaxTokens)
+		LogInfo("[Anthropic] Anonymous mode, using Puppeteer")
+		handleAnthropicViaPuppeteer(w, messages, msgID, clientModel, req.Stream, req.MaxTokens)
 		return
 	}
 
@@ -870,4 +870,36 @@ func handleAnthropicDirectStream(w http.ResponseWriter, answer, msgID, clientMod
 func HandleModelsAnthropic(w http.ResponseWriter, r *http.Request) {
 	// Return models in a format Claude Code might expect
 	HandleModels(w, r)
+}
+
+// handleAnthropicViaPuppeteer uses Puppeteer for anonymous Anthropic requests.
+func handleAnthropicViaPuppeteer(w http.ResponseWriter, messages []Message, msgID, clientModel string, stream bool, maxTokens int) {
+	userMsg := ""
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			userMsg, _ = messages[i].ParseContent()
+			break
+		}
+	}
+	if userMsg == "" {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "No user message")
+		return
+	}
+
+	LogInfo("[Anthropic/Puppeteer] Processing, msg=%s", userMsg[:min(50, len(userMsg))])
+
+	answer, _, err := RunPuppeteerChat(userMsg)
+	if err != nil {
+		LogError("[Anthropic/Puppeteer] Error: %v", err)
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Puppeteer failed: "+err.Error())
+		return
+	}
+
+	LogInfo("[Anthropic/Puppeteer] Done: %d chars", len(answer))
+
+	if stream {
+		handleAnthropicDirectStream(w, answer, msgID, clientModel)
+	} else {
+		handleAnthropicDirectNonStream(w, answer, msgID, clientModel, maxTokens)
+	}
 }

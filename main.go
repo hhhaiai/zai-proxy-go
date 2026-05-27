@@ -33,6 +33,13 @@ func main() {
 		}
 	}()
 
+	// ── Auto captcha solve (disabled — browser proxy handles captcha natively) ──
+	// go func() {
+	// 	time.Sleep(3 * time.Second)
+	// 	internal.AutoSolveCaptcha()
+	// 	internal.StartCaptchaRefresh()
+	// }()
+
 	// ── Routes ──
 	http.HandleFunc("/v1/models", internal.HandleModels)
 	http.HandleFunc("/v1/chat/completions", internal.HandleChatCompletions)

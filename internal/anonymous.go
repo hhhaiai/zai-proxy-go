@@ -134,9 +134,34 @@ type CaptchaSolverResult struct {
 	SecurityToken       string `json:"securityToken"`
 	CertifyID           string `json:"certifyId"`
 	CaptchaVerifyParam  string `json:"captchaVerifyParam"`
+	Cookies             string `json:"cookies"`
 	HasToken            bool   `json:"hasToken"`
 	HasSecurityToken    bool   `json:"hasSecurityToken"`
 	Error               string `json:"error,omitempty"`
+}
+
+// CaptchaSession holds a token + captcha pair from the same browser session.
+// This ensures the captcha_verify_param matches the token's session.
+var (
+	captchaSession     *CaptchaSession
+	captchaSessionLock sync.RWMutex
+)
+
+type CaptchaSession struct {
+	Token              string
+	CaptchaVerifyParam string
+	Cookies            string
+	SolvedAt           time.Time
+}
+
+// GetCaptchaSession returns the cached session (token + captcha) if valid.
+func GetCaptchaSession() *CaptchaSession {
+	captchaSessionLock.RLock()
+	defer captchaSessionLock.RUnlock()
+	if captchaSession != nil && time.Since(captchaSession.SolvedAt) < 30*time.Minute {
+		return captchaSession
+	}
+	return nil
 }
 
 // RunCaptchaSolver 运行 Puppeteer 脚本解决验证码
@@ -162,7 +187,7 @@ func RunCaptchaSolver() (*CaptchaSolverResult, error) {
 	LogInfo("[Captcha] Running Puppeteer captcha solver...")
 
 	// Run the script
-	ctx, cancel := timeoutContext(90 * time.Second)
+	ctx, cancel := timeoutContext(180 * time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "node", scriptPath)
@@ -201,25 +226,21 @@ func RunCaptchaSolver() (*CaptchaSolverResult, error) {
 		return nil, fmt.Errorf("failed to read stdout: %w", err)
 	}
 
-	if err := cmd.Wait(); err != nil {
-		return nil, fmt.Errorf("captcha solver failed: %w, output: %s", err, string(stdoutBytes))
-	}
+	waitErr := cmd.Wait()
 
+	// Even if process was killed (timeout), try to parse output — it may be valid
 	var result CaptchaSolverResult
-	if err := json.Unmarshal(stdoutBytes, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse solver output: %w, output: %s", err, string(stdoutBytes))
+	if parseErr := json.Unmarshal(stdoutBytes, &result); parseErr == nil && result.HasToken {
+		LogInfo("[Captcha] Solver produced valid output (process exit: %v)", waitErr)
+		return &result, nil
 	}
 
-	if result.Error != "" {
-		return nil, fmt.Errorf("solver error: %s", result.Error)
+	if waitErr != nil {
+		return nil, fmt.Errorf("captcha solver failed: %w, output: %s", waitErr, string(stdoutBytes))
 	}
 
-	if !result.HasSecurityToken {
-		return nil, fmt.Errorf("solver did not capture securityToken")
-	}
-
-	LogInfo("[Captcha] Puppeteer solver succeeded! certifyId=%s", result.CertifyID)
-	return &result, nil
+	// Should not reach here (parsed above), but handle gracefully
+	return nil, fmt.Errorf("captcha solver produced no usable output")
 }
 
 // timeoutContext 创建带超时的 context
@@ -235,9 +256,38 @@ func AutoSolveCaptcha() {
 		return
 	}
 
+	var captchaParam string
+
+	// Priority 1: use pre-built captchaVerifyParam from browser intercept
 	if result.CaptchaVerifyParam != "" {
-		SetCaptchaVerifyParam(result.CaptchaVerifyParam)
-		LogInfo("[Captcha] Auto-solve complete, captcha_verify_param cached")
+		captchaParam = result.CaptchaVerifyParam
+		LogInfo("[Captcha] Got captchaVerifyParam from browser intercept")
+	} else if result.HasSecurityToken && result.CertifyID != "" {
+		// Priority 2: build from securityToken + certifyId
+		captchaParam = BuildCaptchaVerifyParam(result.CertifyID, "didk33e0", result.SecurityToken)
+		LogInfo("[Captcha] Built captchaVerifyParam from components")
+	}
+
+	if captchaParam == "" {
+		LogWarn("[Captcha] Auto-solve returned no usable captcha data")
+		return
+	}
+
+	SetCaptchaVerifyParam(captchaParam)
+
+	// Cache the token + captcha pair from the same browser session
+	if result.HasToken && result.Token != "" {
+		captchaSessionLock.Lock()
+		captchaSession = &CaptchaSession{
+			Token:              result.Token,
+			CaptchaVerifyParam: captchaParam,
+			Cookies:            result.Cookies,
+			SolvedAt:           time.Now(),
+		}
+		captchaSessionLock.Unlock()
+		LogInfo("[Captcha] Cached session: token=%s..., captcha cached for 30 min", result.Token[:30])
+	} else {
+		LogInfo("[Captcha] Auto-solve complete, captcha cached for 30 min (no token from session)")
 	}
 }
 

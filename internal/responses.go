@@ -162,11 +162,16 @@ func HandleResponses(w http.ResponseWriter, r *http.Request) {
 	responseID := fmt.Sprintf("resp_%s", uuid.New().String()[:24])
 	outputMsgID := fmt.Sprintf("msg_%s", uuid.New().String()[:24])
 
-	// Anonymous mode: route through browser proxy
+	// Anonymous mode: use cached session if available, otherwise browser proxy
 	if isAnonymous {
-		LogInfo("[Responses] Anonymous mode, routing through browser proxy")
-		handleResponsesViaBrowserProxy(w, req.Model, messages, req.Stream, responseID, outputMsgID)
-		return
+		if session := GetCaptchaSession(); session != nil {
+			LogInfo("[Responses] Using cached session for direct API call")
+			token = session.Token
+		} else {
+			LogInfo("[Responses] No cached session, routing through browser proxy")
+			handleResponsesViaBrowserProxy(w, req.Model, messages, req.Stream, responseID, outputMsgID)
+			return
+		}
 	}
 
 	resp, modelName, err := makeUpstreamRequest(token, messages, req.Model)
@@ -700,4 +705,118 @@ func writeResponsesError(w http.ResponseWriter, statusCode int, message string) 
 			"type":    "invalid_request_error",
 		},
 	})
+}
+
+// handleResponsesViaPuppeteer uses Puppeteer for anonymous Responses requests.
+func handleResponsesViaPuppeteer(w http.ResponseWriter, clientModel string, messages []Message, stream bool, responseID, outputMsgID string) {
+	userMsg := ""
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			userMsg, _ = messages[i].ParseContent()
+			break
+		}
+	}
+	if userMsg == "" {
+		writeResponsesError(w, http.StatusBadRequest, "No user message")
+		return
+	}
+
+	LogInfo("[Responses/Puppeteer] Processing, msg=%s", userMsg[:min(50, len(userMsg))])
+
+	answer, _, err := RunPuppeteerChat(userMsg)
+	if err != nil {
+		LogError("[Responses/Puppeteer] Error: %v", err)
+		writeResponsesError(w, http.StatusBadGateway, "Puppeteer failed: "+err.Error())
+		return
+	}
+
+	LogInfo("[Responses/Puppeteer] Done: %d chars", len(answer))
+
+	outputTokens := len(answer) / 4
+
+	if stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		sendResponsesSSE(w, flusher, "response.created", map[string]interface{}{
+			"type": "response.created",
+			"response": map[string]interface{}{
+				"id": responseID, "object": "response",
+				"created_at": time.Now().Unix(), "model": clientModel,
+				"output": []interface{}{},
+				"usage": map[string]int{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+				"status": "in_progress",
+			},
+		})
+
+		sendResponsesSSE(w, flusher, "response.output_item.added", map[string]interface{}{
+			"type": "response.output_item.added", "output_index": 0,
+			"item": map[string]interface{}{
+				"type": "message", "id": outputMsgID, "role": "assistant",
+				"content": []interface{}{}, "status": "in_progress",
+			},
+		})
+
+		sendResponsesSSE(w, flusher, "response.content_part.added", map[string]interface{}{
+			"type": "response.content_part.added", "output_index": 0, "content_index": 0,
+			"part": map[string]interface{}{"type": "output_text", "text": ""},
+		})
+
+		sendResponsesSSE(w, flusher, "response.output_text.delta", map[string]interface{}{
+			"type": "response.output_text.delta", "output_index": 0, "content_index": 0,
+			"delta": answer,
+		})
+
+		sendResponsesSSE(w, flusher, "response.content_part.done", map[string]interface{}{
+			"type": "response.content_part.done", "output_index": 0, "content_index": 0,
+			"part": map[string]interface{}{"type": "output_text", "text": ""},
+		})
+
+		sendResponsesSSE(w, flusher, "response.output_item.done", map[string]interface{}{
+			"type": "response.output_item.done", "output_index": 0,
+			"item": map[string]interface{}{
+				"type": "message", "id": outputMsgID, "role": "assistant",
+				"content": []interface{}{}, "status": "completed",
+			},
+		})
+
+		sendResponsesSSE(w, flusher, "response.completed", map[string]interface{}{
+			"type": "response.completed",
+			"response": map[string]interface{}{
+				"id": responseID, "object": "response",
+				"created_at": time.Now().Unix(), "model": clientModel,
+				"output": []map[string]interface{}{
+					{"type": "message", "id": outputMsgID, "role": "assistant",
+						"content": []map[string]interface{}{{"type": "output_text", "text": answer}},
+						"status": "completed"},
+				},
+				"usage": map[string]int{"input_tokens": 0, "output_tokens": outputTokens, "total_tokens": outputTokens},
+				"status": "completed",
+			},
+		})
+	} else {
+		response := ResponsesAPIResponse{
+			ID:        responseID,
+			Object:    "response",
+			CreatedAt: time.Now().Unix(),
+			Model:     clientModel,
+			Output: []ResponsesOutputItem{
+				{
+					Type: "message", ID: outputMsgID, Role: "assistant",
+					Content: []ResponsesOutputContent{{Type: "output_text", Text: answer}},
+					Status:  "completed",
+				},
+			},
+			Usage:  ResponsesUsage{OutputTokens: outputTokens, TotalTokens: outputTokens},
+			Status: "completed",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}
 }

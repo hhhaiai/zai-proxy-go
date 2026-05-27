@@ -131,7 +131,7 @@ func makeUpstreamRequest(token string, messages []Message, model string) (*http.
 		body["current_user_message_id"] = userMsgID
 	}
 
-	// captcha_verify_param: include if available from /captcha page
+	// captcha_verify_param: include if available from /captcha page or env
 	if captchaParam, err := GetCaptchaVerifyParam(); err == nil && captchaParam != "" {
 		body["captcha_verify_param"] = captchaParam
 		LogDebug("[Upstream] Including captcha_verify_param")
@@ -155,6 +155,12 @@ func makeUpstreamRequest(token string, messages []Message, model string) (*http.
 	req.Header.Set("Origin", "https://chat.z.ai")
 	req.Header.Set("Referer", fmt.Sprintf("https://chat.z.ai/c/%s", uuid.New().String()))
 	req.Header.Set("User-Agent", uarand.GetRandom())
+
+	// Include cookies from captcha browser session if available
+	if session := GetCaptchaSession(); session != nil && session.Cookies != "" {
+		req.Header.Set("Cookie", session.Cookies)
+		LogDebug("[Upstream] Including cookies from captcha session")
+	}
 
 	LogInfo("[Upstream] Sending request: model=%s, target=%s", model, targetModel)
 
@@ -363,9 +369,9 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	isGLM5 := IsGLM5Model(req.Model)
 
-	// For anonymous mode, use browser proxy
+	// For anonymous mode: use Puppeteer browser (handles captcha automatically)
 	if isAnonymous {
-		handleBrowserProxyRequest(w, req)
+		handlePuppeteerRequest(w, req)
 		return
 	}
 
@@ -1130,3 +1136,73 @@ func handleBrowserProxyRequest(w http.ResponseWriter, req ChatRequest) {
 }
 
 func strPtr(s string) *string { return &s }
+
+// handlePuppeteerRequest uses the Puppeteer captcha_solver.js to send messages
+// through the browser UI. The browser handles captcha automatically.
+func handlePuppeteerRequest(w http.ResponseWriter, req ChatRequest) {
+	// Extract user message
+	userMsg := ""
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "user" {
+			userMsg, _ = req.Messages[i].ParseContent()
+			break
+		}
+	}
+	if userMsg == "" {
+		http.Error(w, "No user message found", http.StatusBadRequest)
+		return
+	}
+
+	LogInfo("[Puppeteer] Processing: model=%s, msg=%s", req.Model, userMsg[:min(50, len(userMsg))])
+
+	answer, _, err := RunPuppeteerChat(userMsg)
+	if err != nil {
+		LogError("[Puppeteer] Error: %v", err)
+		http.Error(w, "Puppeteer error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	LogInfo("[Puppeteer] Done: %d chars", len(answer))
+
+	completionID := fmt.Sprintf("chatcmpl-%s", uuid.New().String()[:29])
+
+	if req.Stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		flusher, ok := w.(http.Flusher)
+		chunk := ChatCompletionChunk{
+			ID:      completionID,
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   req.Model,
+			Choices: []Choice{{
+				Index: 0,
+				Delta: Delta{Content: answer},
+			}},
+		}
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		done := ChatCompletionChunk{
+			ID: completionID, Object: "chat.completion.chunk",
+			Created: time.Now().Unix(), Model: req.Model,
+			Choices: []Choice{{Index: 0, FinishReason: strPtr("stop")}},
+		}
+		dd, _ := json.Marshal(done)
+		fmt.Fprintf(w, "data: %s\n\n", dd)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		if ok { flusher.Flush() }
+	} else {
+		resp := ChatCompletionResponse{
+			ID: completionID, Object: "chat.completion",
+			Created: time.Now().Unix(), Model: req.Model,
+			Choices: []Choice{{
+				Index: 0,
+				Message: &MessageResp{Role: "assistant", Content: answer},
+				FinishReason: strPtr("stop"),
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
+}

@@ -40,7 +40,7 @@ func (w *worker) markFree() { w.mu.Lock(); w.busy = false; w.mu.Unlock() }
 // ensureAlive checks if the page is responsive. If not, recreates the tab context.
 func (w *worker) ensureAlive() error {
 	var title string
-	checkCtx, checkCancel := context.WithTimeout(w.ctx, 10*time.Second)
+	checkCtx, checkCancel := context.WithTimeout(w.ctx, 20*time.Second)
 	err := chromedp.Run(checkCtx, chromedp.Title(&title))
 	checkCancel()
 	if err == nil {
@@ -54,11 +54,11 @@ func (w *worker) ensureAlive() error {
 	w.cancel()
 	w.ctx, w.cancel = chromedp.NewContext(browserCtx)
 
-	navCtx, navCancel := context.WithTimeout(w.ctx, navigateTimeout)
+	navCtx, navCancel := context.WithTimeout(w.ctx, 45*time.Second)
 	err = chromedp.Run(navCtx,
 		chromedp.Navigate(zaiURL),
 		chromedp.WaitReady("body"),
-		chromedp.Sleep(3*time.Second),
+		chromedp.Sleep(5*time.Second),
 	)
 	navCancel()
 	if err != nil {
@@ -236,36 +236,35 @@ func ProcessChat(w *worker, userMessage string) (string, error) {
 
 func findInput(w *worker) string {
 	candidates := []string{
+		"#chat-input",
 		"textarea",
 		"[contenteditable='true']",
 		"div[role='textbox']",
-		"#chat-input",
 		"[placeholder]",
 	}
 	for _, sel := range candidates {
 		var n int
-		ctx, cancel := context.WithTimeout(w.ctx, 2*time.Second)
+		ctx, cancel := context.WithTimeout(w.ctx, 3*time.Second)
 		err := chromedp.Run(ctx,
 			chromedp.Evaluate(fmt.Sprintf(`document.querySelectorAll('%s').length`, sel), &n),
 		)
 		cancel()
 		if err == nil && n > 0 {
+			log.Printf("[BrowserPool] W%d found input: %s (count=%d)", w.id, sel, n)
 			return sel
 		}
 	}
 
-	// Debug: dump all interactive elements
+	// Debug: dump page URL and interactive elements
+	var pageURL string
 	var html string
 	ctx2, cancel2 := context.WithTimeout(w.ctx, 5*time.Second)
-	chromedp.Run(ctx2, chromedp.Evaluate(`JSON.stringify([...document.querySelectorAll('input,textarea,[contenteditable],[role=textbox],div[class*=input],div[class*=editor]')].map(e => ({tag:e.tagName, id:e.id, class:e.className, role:e.getAttribute('role'), ce:e.getAttribute('contenteditable'), type:e.getAttribute('type')})))`, &html))
+	chromedp.Run(ctx2,
+		chromedp.Evaluate(`document.location.href`, &pageURL),
+		chromedp.Evaluate(`JSON.stringify([...document.querySelectorAll('input,textarea,[contenteditable],[role=textbox],div[class*=input],div[class*=editor],#chat-input')].map(e => ({tag:e.tagName, id:e.id, cls:(e.className||'').substring(0,60), role:e.getAttribute('role'), ce:e.getAttribute('contenteditable')})))`, &html),
+	)
 	cancel2()
-	log.Printf("[BrowserPool] W%d DOM interactive elements: %s", w.id, html)
-		// Debug: dump interactive elements
-	var debugHTML string
-	dbgCtx, dbgCancel := context.WithTimeout(w.ctx, 5*time.Second)
-	chromedp.Run(dbgCtx, chromedp.Evaluate(`JSON.stringify([...document.querySelectorAll("input,textarea,[contenteditable],[role=textbox],div[class*=input],div[class*=editor]")].map(e=>({tag:e.tagName,id:e.id,cls:e.className,role:e.getAttribute("role"),ce:e.getAttribute("contenteditable")})))`, &debugHTML))
-	dbgCancel()
-	log.Printf("[BrowserPool] W%d DOM elements: %s", w.id, debugHTML)
+	log.Printf("[BrowserPool] W%d url=%s, DOM elements: %s", w.id, pageURL, html)
 
 	return ""
 }
