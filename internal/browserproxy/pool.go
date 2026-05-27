@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"log"
 )
@@ -33,6 +34,12 @@ type Session struct {
 	tabMu   sync.Mutex
 }
 
+// CaptchaInfo holds the intercepted captcha parameters.
+type CaptchaInfo struct {
+	CaptchaVerifyParam string
+	CapturedAt         time.Time
+}
+
 // ───────── Session Pool ─────────
 
 var (
@@ -43,6 +50,10 @@ var (
 	poolReady      atomic.Bool
 	activeSessions atomic.Int32
 	sessionIdx     atomic.Int64
+	
+	// Captcha cache
+	cachedCaptcha     *CaptchaInfo
+	captchaMu         sync.RWMutex
 )
 
 func Init(poolSize int) error {
@@ -119,9 +130,7 @@ func Init(poolSize int) error {
 	return nil
 }
 
-// createSession creates a persistent browser tab with z.ai loaded.
 func createSession(id int) (*Session, error) {
-	// Create a new tab context
 	tabCtx, cancel := chromedp.NewContext(poolCtx)
 	defer cancel()
 
@@ -131,7 +140,6 @@ func createSession(id int) (*Session, error) {
 	var token string
 	var cookies string
 
-	// Navigate to z.ai and get session info
 	err := chromedp.Run(navCtx,
 		chromedp.Navigate(zaiURL),
 		chromedp.WaitReady("body"),
@@ -181,7 +189,6 @@ func refreshLoop() {
 
 // ───────── Public API ─────────
 
-// GetSession returns a session for API calls (round-robin).
 func GetSession() *Session {
 	sessionsMu.RLock()
 	defer sessionsMu.RUnlock()
@@ -198,38 +205,69 @@ func IsReady() bool      { return poolReady.Load() }
 func HandleStatus(w http.ResponseWriter, _ *http.Request) {
 	sessionsMu.RLock()
 	defer sessionsMu.RUnlock()
+	
+	captchaMu.RLock()
+	hasCaptcha := cachedCaptcha != nil && time.Since(cachedCaptcha.CapturedAt) < 30*time.Minute
+	captchaMu.RUnlock()
+	
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"ready":    poolReady.Load(),
-		"sessions": len(sessions),
-		"active":   activeSessions.Load(),
+		"ready":       poolReady.Load(),
+		"sessions":    len(sessions),
+		"active":      activeSessions.Load(),
+		"has_captcha": hasCaptcha,
 	})
 }
 
-// ───────── Chat via Browser ─────────
+// GetCachedCaptcha returns the cached captcha_verify_param if valid.
+func GetCachedCaptcha() string {
+	captchaMu.RLock()
+	defer captchaMu.RUnlock()
+	if cachedCaptcha != nil && time.Since(cachedCaptcha.CapturedAt) < 30*time.Minute {
+		return cachedCaptcha.CaptchaVerifyParam
+	}
+	return ""
+}
 
-// ChatViaBrowser sends a message through the browser and returns the response.
+// SetCachedCaptcha caches the captcha_verify_param.
+func SetCachedCaptcha(param string) {
+	captchaMu.Lock()
+	defer captchaMu.Unlock()
+	cachedCaptcha = &CaptchaInfo{
+		CaptchaVerifyParam: param,
+		CapturedAt:         time.Now(),
+	}
+	log.Printf("[Captcha] Captured captcha_verify_param (len=%d)", len(param))
+}
+
+// ───────── Chat via Browser with Network Interception ─────────
+
 func ChatViaBrowser(userMessage string) (string, error) {
 	if !poolReady.Load() {
 		return "", fmt.Errorf("browser pool not ready")
 	}
 
-	// Get a session
-	session := GetSession()
-	if session == nil {
-		return "", fmt.Errorf("no available session")
-	}
-
-	// Lock the session to prevent concurrent use
-	session.tabMu.Lock()
-	defer session.tabMu.Unlock()
-
-	// Create a new tab for this request (faster than reusing)
+	// Create a new tab for this request
 	tabCtx, cancel := chromedp.NewContext(poolCtx)
 	defer cancel()
 
 	chatCtx, chatCancel := context.WithTimeout(tabCtx, chatTimeout)
 	defer chatCancel()
+
+	// Enable network interception
+	chromedp.Run(chatCtx, network.Enable())
+
+	// Set up network event listener to capture captcha_verify_param
+	var capturedCaptchaParam string
+	
+	// Listen for network events using chromedp's event system
+	lctx, lcancel := context.WithCancel(chatCtx)
+	defer lcancel()
+	
+	chromedp.Run(lctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		// This is a placeholder - the actual interception happens via JavaScript
+		return nil
+	}))
 
 	// Navigate to z.ai
 	err := chromedp.Run(chatCtx,
@@ -241,7 +279,56 @@ func ChatViaBrowser(userMessage string) (string, error) {
 		return "", fmt.Errorf("navigate: %w", err)
 	}
 
-	// Find and type message using JavaScript
+	// Inject JavaScript to intercept fetch/XHR requests and capture captcha_verify_param
+	chromedp.Run(chatCtx, chromedp.Evaluate(`
+		(function() {
+			// Intercept fetch requests
+			const originalFetch = window.fetch;
+			window.fetch = function(...args) {
+				const url = args[0];
+				const options = args[1] || {};
+				
+				if (url && url.includes('chat.z.ai/api') && options.method === 'POST') {
+					try {
+						const body = JSON.parse(options.body);
+						if (body.captcha_verify_param) {
+							window.__intercepted_captcha = body.captcha_verify_param;
+							console.log('[Intercept] Captured captcha_verify_param');
+						}
+					} catch(e) {}
+				}
+				
+				return originalFetch.apply(this, args);
+			};
+			
+			// Intercept XMLHttpRequest
+			const originalOpen = XMLHttpRequest.prototype.open;
+			const originalSend = XMLHttpRequest.prototype.send;
+			
+			XMLHttpRequest.prototype.open = function(method, url) {
+				this._url = url;
+				this._method = method;
+				return originalOpen.apply(this, arguments);
+			};
+			
+			XMLHttpRequest.prototype.send = function(body) {
+				if (this._url && this._url.includes('chat.z.ai/api') && this._method === 'POST') {
+					try {
+						const parsed = JSON.parse(body);
+						if (parsed.captcha_verify_param) {
+							window.__intercepted_captcha = parsed.captcha_verify_param;
+							console.log('[Intercept] Captured captcha_verify_param via XHR');
+						}
+					} catch(e) {}
+				}
+				return originalSend.apply(this, arguments);
+			};
+			
+			console.log('[Intercept] Network interception installed');
+		})()
+	`, nil))
+
+	// Find and type message
 	var typeResult string
 	typeCtx, typeCancel := context.WithTimeout(chatCtx, 15*time.Second)
 	err = chromedp.Run(typeCtx,
@@ -249,14 +336,10 @@ func ChatViaBrowser(userMessage string) (string, error) {
 		chromedp.Evaluate(fmt.Sprintf(`
 			(function() {
 				var msg = %q;
-				
-				// Find the input element - try multiple selectors
 				var input = document.querySelector('textarea') || 
 				            document.querySelector('div[contenteditable="true"]') ||
 				            document.querySelector('input[type="text"]');
-				
 				if (!input) {
-					// Try harder to find input
 					var allInputs = document.querySelectorAll('textarea, input, [contenteditable]');
 					for (var i = 0; i < allInputs.length; i++) {
 						var el = allInputs[i];
@@ -267,10 +350,7 @@ func ChatViaBrowser(userMessage string) (string, error) {
 						}
 					}
 				}
-				
 				if (!input) return 'no-input-found';
-				
-				// Set the value
 				if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
 					input.value = msg;
 					input.dispatchEvent(new Event('input', {bubbles: true}));
@@ -279,7 +359,6 @@ func ChatViaBrowser(userMessage string) (string, error) {
 					input.textContent = msg;
 					input.dispatchEvent(new Event('input', {bubbles: true}));
 				}
-				
 				input.focus();
 				return 'typed';
 			})()
@@ -293,7 +372,7 @@ func ChatViaBrowser(userMessage string) (string, error) {
 		return "", fmt.Errorf("could not type: %s", typeResult)
 	}
 
-	// Send message by pressing Enter or clicking send button
+	// Send message
 	var sendResult string
 	sendCtx, sendCancel := context.WithTimeout(chatCtx, 5*time.Second)
 	chromedp.Run(sendCtx, chromedp.Evaluate(`
@@ -302,14 +381,10 @@ func ChatViaBrowser(userMessage string) (string, error) {
 			            document.querySelector('div[contenteditable="true"]') ||
 			            document.querySelector('input[type="text"]');
 			if (!input) return 'no-input';
-			
-			// Try Enter key
 			input.dispatchEvent(new KeyboardEvent('keydown', {
 				key:'Enter', code:'Enter', keyCode:13, which:13,
 				bubbles:true, cancelable:true
 			}));
-			
-			// Also try clicking send button
 			var btns = document.querySelectorAll('button');
 			for (var i = 0; i < btns.length; i++) {
 				var btn = btns[i];
@@ -328,6 +403,25 @@ func ChatViaBrowser(userMessage string) (string, error) {
 	sendCancel()
 
 	log.Printf("[BrowserChat] Send: %s", sendResult)
+
+	// Wait for the request to be sent and intercept captcha_verify_param
+	time.Sleep(3 * time.Second)
+
+	// Check if we intercepted captcha_verify_param
+	chromedp.Run(chatCtx, chromedp.Evaluate(`
+		if (window.__intercepted_captcha) {
+			window.__captcha_result = window.__intercepted_captcha;
+		}
+	`, nil))
+
+	var interceptedParam string
+	chromedp.Run(chatCtx, chromedp.Evaluate(`window.__captcha_result || ''`, &interceptedParam))
+	
+	if interceptedParam != "" {
+		capturedCaptchaParam = interceptedParam
+		SetCachedCaptcha(capturedCaptchaParam)
+		log.Printf("[BrowserChat] Captured captcha_verify_param (len=%d)", len(capturedCaptchaParam))
+	}
 
 	// Poll for response
 	var prevLen int
