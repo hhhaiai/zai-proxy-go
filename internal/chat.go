@@ -58,18 +58,21 @@ func makeUpstreamRequest(token string, messages []Message, model string) (*http.
 		fmt.Sprintf("/c/%s", chatID),
 		timestamp)
 
-	enableThinking := IsThinkingModel(model)
-	autoWebSearch := IsSearchModel(model)
-	isGLM5 := IsGLM5Model(model)
+	// Thinking and search defaults: always enabled unless explicitly disabled
+	enableThinking := true
+	if strings.HasSuffix(model, "-nothinking") {
+		enableThinking = false
+	}
+	autoWebSearch := true
 	if targetModel == "glm-4.5v" || targetModel == "glm-4.6v" {
 		autoWebSearch = false
 	}
 
+	// MCP servers: always include advanced-search for text models
 	var mcpServers []string
 	if targetModel == "glm-4.6v" {
 		mcpServers = []string{"vlm-image-search", "vlm-image-recognition", "vlm-image-processing"}
-	}
-	if isGLM5 {
+	} else {
 		mcpServers = []string{"advanced-search"}
 	}
 
@@ -102,62 +105,42 @@ func makeUpstreamRequest(token string, messages []Message, model string) (*http.
 		upstreamMessages = append(upstreamMessages, msg.ToUpstreamMessage(urlToFileID))
 	}
 
-	features := map[string]interface{}{
-		"image_generation": false,
-		"web_search":       false,
-		"auto_web_search":  autoWebSearch,
-		"preview_mode":     true,
-		"enable_thinking":  enableThinking,
-	}
-	if isGLM5 {
-		features["flags"] = []interface{}{}
-	}
-
 	body := map[string]interface{}{
-		"stream":                         true,
-		"model":                          targetModel,
-		"messages":                       upstreamMessages,
-		"signature_prompt":               latestUserContent,
-		"params":                         map[string]interface{}{},
-		"extra":                          map[string]interface{}{},
-		"features":                       features,
-		"chat_id":                        chatID,
-		"id":                             uuid.New().String(),
-		"current_user_message_id":        userMsgID,
-		"current_user_message_parent_id": nil,
-		"background_tasks": map[string]interface{}{
-			"title_generation": true,
-			"tags_generation":  true,
+		"stream":           true,
+		"model":            targetModel,
+		"messages":         upstreamMessages,
+		"signature_prompt": latestUserContent,
+		"params":           map[string]interface{}{},
+		"features": map[string]interface{}{
+			"image_generation": false,
+			"web_search":       false,
+			"auto_web_search":  autoWebSearch,
+			"preview_mode":     true,
+			"enable_thinking":  enableThinking,
 		},
+		"chat_id": chatID,
+		"id":      uuid.New().String(),
 	}
 
 	if len(mcpServers) > 0 {
 		body["mcp_servers"] = mcpServers
 	}
 
-	if isGLM5 {
-		now := time.Now()
-		loc, _ := time.LoadLocation("Asia/Shanghai")
-		if loc != nil {
-			now = now.In(loc)
-		}
-		body["variables"] = map[string]interface{}{
-			"{{USER_NAME}}":        "Guest",
-			"{{USER_LOCATION}}":    "Unknown",
-			"{{CURRENT_DATETIME}}": now.Format("2006-01-02 15:04:05"),
-			"{{CURRENT_DATE}}":     now.Format("2006-01-02"),
-			"{{CURRENT_TIME}}":     now.Format("15:04:05"),
-			"{{CURRENT_WEEKDAY}}":  now.Weekday().String(),
-			"{{CURRENT_TIMEZONE}}": "Asia/Shanghai",
-			"{{USER_LANGUAGE}}":    "en-US",
-		}
-	}
-
 	if len(filesData) > 0 {
 		body["files"] = filesData
+		body["current_user_message_id"] = userMsgID
+	}
+
+	// captcha_verify_param: include if available from /captcha page
+	if captchaParam, err := GetCaptchaVerifyParam(); err == nil && captchaParam != "" {
+		body["captcha_verify_param"] = captchaParam
+		LogDebug("[Upstream] Including captcha_verify_param")
 	}
 
 	bodyBytes, _ := json.Marshal(body)
+
+	// Debug: log request body
+	LogDebug("[Upstream] Request body: %s", string(bodyBytes))
 
 	req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
@@ -184,7 +167,6 @@ func makeUpstreamRequest(token string, messages []Message, model string) (*http.
 			TLSHandshakeTimeout:   15 * time.Second,
 			ResponseHeaderTimeout: 60 * time.Second,
 		},
-		// 不设置全局 Timeout，因为 SSE 流式响应需要长时间读取
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -204,7 +186,38 @@ type UpstreamData struct {
 		EditContent  string `json:"edit_content"`
 		Phase        string `json:"phase"`
 		Done         bool   `json:"done"`
+		Error        *struct {
+			Code            string `json:"code"`
+			Detail          string `json:"detail"`
+			CaptchaErrorType string `json:"captcha_error_type"`
+			ErrorCode       string `json:"error_code"`
+		} `json:"error,omitempty"`
+		Data *struct {
+			Done  bool `json:"done"`
+			Error *struct {
+				Code            string `json:"code"`
+				Detail          string `json:"detail"`
+				CaptchaErrorType string `json:"captcha_error_type"`
+				ErrorCode       string `json:"error_code"`
+			} `json:"error,omitempty"`
+		} `json:"data,omitempty"`
 	} `json:"data"`
+}
+
+// GetError returns the error from upstream data (checks both levels)
+func (u *UpstreamData) GetError() *struct {
+	Code            string `json:"code"`
+	Detail          string `json:"detail"`
+	CaptchaErrorType string `json:"captcha_error_type"`
+	ErrorCode       string `json:"error_code"`
+} {
+	if u.Data.Error != nil {
+		return u.Data.Error
+	}
+	if u.Data.Data != nil && u.Data.Data.Error != nil {
+		return u.Data.Data.Error
+	}
+	return nil
 }
 
 func (u *UpstreamData) GetEditContent() string {
@@ -313,14 +326,32 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Track whether this is anonymous mode
+	isAnonymous := false
+
+	// 使用Token管理器获取实际使用的token
 	if token == "free" {
-		anonymousToken, err := GetAnonymousToken()
+		isAnonymous = true
+		actualToken, err := GetTokenManager().GetNextToken()
 		if err != nil {
-			LogError("Failed to get anonymous token: %v", err)
-			http.Error(w, "Failed to get anonymous token", http.StatusInternalServerError)
+			LogError("Failed to get token from manager: %v", err)
+			http.Error(w, "No available tokens", http.StatusInternalServerError)
 			return
 		}
-		token = anonymousToken
+		if len(actualToken) > 30 {
+			LogDebug("TokenManager returned: %s...", actualToken[:30])
+		} else {
+			LogDebug("TokenManager returned: %s", actualToken)
+		}
+		token = actualToken
+	} else if token == "managed" {
+		actualToken, err := GetTokenManager().GetNextToken()
+		if err != nil {
+			LogError("Failed to get token from manager: %v", err)
+			http.Error(w, "No available tokens", http.StatusInternalServerError)
+			return
+		}
+		token = actualToken
 	}
 
 	var req ChatRequest
@@ -329,19 +360,39 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Anonymous mode only supports GLM-4.7
+	if isAnonymous {
+		req.Model = "GLM-4.7"
+		LogInfo("[Anonymous] Forced model to GLM-4.7")
+	}
+
 	if req.Model == "" {
-		req.Model = "GLM-4.6"
+		req.Model = "GLM-4.7"
 	}
 
 	isGLM5 := IsGLM5Model(req.Model)
 
+	// For anonymous mode, use browser proxy
+	if isAnonymous {
+		handleBrowserProxyRequest(w, req)
+		return
+	}
+
 	resp, modelName, err := makeUpstreamRequest(token, req.Messages, req.Model)
 	if err != nil {
 		LogError("Upstream request failed: %v", err)
+		if len(token) > 50 {
+			LogDebug("Failed token (first 50): %s", token[:50])
+		} else {
+			LogDebug("Failed token: %s", token)
+		}
 		http.Error(w, "Upstream error", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+
+	// Debug: log response headers
+	LogDebug("[Upstream] Response headers: %v", resp.Header)
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -350,6 +401,15 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			bodyStr = bodyStr[:500]
 		}
 		LogError("Upstream error: status=%d, body=%s", resp.StatusCode, bodyStr)
+
+		// Token失效处理
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			// 标记当前token无效
+			if token != "free" && token != "managed" {
+				GetTokenManager().InvalidateToken(token, fmt.Sprintf("HTTP %d", resp.StatusCode))
+			}
+		}
+
 		http.Error(w, "Upstream error", resp.StatusCode)
 		return
 	}
@@ -401,13 +461,40 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 			continue
 		}
 
-		if upstream.Data.Phase == "done" {
-			break
+		// Check for upstream errors (e.g., captcha required)
+		if upstreamErr := upstream.GetError(); upstreamErr != nil {
+			LogError("[Upstream] Error: code=%s, detail=%s", upstreamErr.Code, upstreamErr.Detail)
+			errMsg := upstreamErr.Detail
+			if errMsg == "" {
+				errMsg = "Upstream error: " + upstreamErr.Code
+			}
+			if upstreamErr.Code == "FRONTEND_CAPTCHA_REQUIRED" {
+				port := "8000"
+				if Cfg != nil && Cfg.Port != "" {
+					port = Cfg.Port
+				}
+				errMsg = fmt.Sprintf("Captcha required. Please visit http://localhost:%s/captcha in your browser to solve captcha first.", port)
+			}
+			chunk := ChatCompletionChunk{
+				ID:      completionID,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   modelName,
+				Choices: []Choice{{
+					Index: 0,
+					Delta: Delta{Content: "[Error] " + errMsg},
+					FinishReason: func() *string { s := "stop"; return &s }(),
+				}},
+			}
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
 		}
 
-		// 跳过 usage 统计数据（GLM-5 的 phase:"other" 带 usage 无内容）
-		if upstream.Data.Phase == "other" && upstream.Data.DeltaContent == "" && upstream.GetEditContent() == "" {
-			continue
+		if upstream.Data.Phase == "done" {
+			break
 		}
 
 		if upstream.Data.Phase == "thinking" && upstream.Data.DeltaContent != "" {
@@ -757,9 +844,17 @@ func handleNonStreamResponse(w http.ResponseWriter, body io.ReadCloser, completi
 	hasThinking := false
 	pendingSourcesMarkdown := ""
 	pendingImageSearchMarkdown := ""
+	lineCount := 0
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		lineCount++
+
+		// Debug: log first few lines
+		if lineCount <= 10 {
+			LogDebug("[NonStream] Line %d: %s", lineCount, line)
+		}
+
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
@@ -772,6 +867,37 @@ func handleNonStreamResponse(w http.ResponseWriter, body io.ReadCloser, completi
 		var upstream UpstreamData
 		if err := json.Unmarshal([]byte(payload), &upstream); err != nil {
 			continue
+		}
+
+		// Check for upstream errors (e.g., captcha required)
+		if upstreamErr := upstream.GetError(); upstreamErr != nil {
+			LogError("[NonStream] Upstream error: code=%s, detail=%s", upstreamErr.Code, upstreamErr.Detail)
+			errMsg := upstreamErr.Detail
+			if upstreamErr.Code == "FRONTEND_CAPTCHA_REQUIRED" {
+				port := "8000"
+				if Cfg != nil && Cfg.Port != "" {
+					port = Cfg.Port
+				}
+				errMsg = fmt.Sprintf("Captcha required. Please visit http://localhost:%s/captcha in your browser to solve captcha first.", port)
+			}
+			stopReason := "stop"
+			response := ChatCompletionResponse{
+				ID:      completionID,
+				Object:  "chat.completion",
+				Created: time.Now().Unix(),
+				Model:   modelName,
+				Choices: []Choice{{
+					Index: 0,
+					Message: &MessageResp{
+						Role:    "assistant",
+						Content: "[Error] " + errMsg,
+					},
+					FinishReason: &stopReason,
+				}},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(response)
+			return
 		}
 
 		if upstream.Data.Phase == "done" {
@@ -884,6 +1010,13 @@ func handleNonStreamResponse(w http.ResponseWriter, body io.ReadCloser, completi
 	fullReasoning := strings.Join(reasoningChunks, "")
 	fullReasoning = searchRefFilter.Process(fullReasoning) + searchRefFilter.Flush()
 
+	// Debug: log content
+	LogDebug("[NonStream] Total lines: %d, chunks: %d, reasoningChunks: %d", lineCount, len(chunks), len(reasoningChunks))
+	LogDebug("[NonStream] Full content length: %d, fullReasoning length: %d", len(fullContent), len(fullReasoning))
+	if len(fullContent) > 0 {
+		LogDebug("[NonStream] Content preview: %s", fullContent[:min(200, len(fullContent))])
+	}
+
 	if fullContent == "" {
 		LogError("Non-stream response 200 but no content received")
 	}
@@ -926,4 +1059,61 @@ func HandleModels(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleBrowserProxyRequest forwards anonymous requests to the browser proxy
+func handleBrowserProxyRequest(w http.ResponseWriter, req ChatRequest) {
+	browserProxyURL := "http://localhost:9877/v1/chat/completions"
+
+	// Forward the request to the browser proxy
+	bodyBytes, _ := json.Marshal(req)
+	proxyReq, err := http.NewRequest("POST", browserProxyURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		LogError("[BrowserProxy] Failed to create request: %v", err)
+		http.Error(w, "Browser proxy error", http.StatusBadGateway)
+		return
+	}
+	proxyReq.Header.Set("Content-Type", "application/json")
+
+	LogInfo("[BrowserProxy] Forwarding anonymous request: model=%s", req.Model)
+
+	client := &http.Client{
+		Timeout: 180 * time.Second, // Browser proxy can be slow (captcha solving)
+	}
+
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		LogError("[BrowserProxy] Request failed: %v", err)
+		http.Error(w, "Browser proxy unavailable. Make sure browser_proxy.js is running on port 9877.", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	LogInfo("[BrowserProxy] Response status: %d", resp.StatusCode)
+
+	// Forward response headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// Stream the response
+	flusher, ok := w.(http.Flusher)
+	if ok {
+		buf := make([]byte, 4096)
+		for {
+			n, err := resp.Body.Read(buf)
+			if n > 0 {
+				w.Write(buf[:n])
+				flusher.Flush()
+			}
+			if err != nil {
+				break
+			}
+		}
+	} else {
+		io.Copy(w, resp.Body)
+	}
 }

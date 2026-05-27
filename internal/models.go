@@ -13,6 +13,7 @@ var BaseModelMapping = map[string]string{
 	"GLM-4.6":      "GLM-4-6-API-V1",
 	"GLM-4.7":      "glm-4.7",
 	"GLM-5":        "glm-5",
+	"GLM-5.1":      "GLM-5.1",
 	"GLM-4.5-V":    "glm-4.5v",
 	"GLM-4.6-V":    "glm-4.6v",
 	"GLM-4.5-Air":  "0727-106B-API",
@@ -30,6 +31,10 @@ var ModelList = []string{
 	"GLM-5-thinking",
 	"GLM-5-search",
 	"GLM-5-thinking-search",
+	"GLM-5.1",
+	"GLM-5.1-thinking",
+	"GLM-5.1-search",
+	"GLM-5.1-thinking-search",
 	"GLM-4.5-V",
 	"GLM-4.6-V",
 	"GLM-4.6-V-thinking",
@@ -72,7 +77,7 @@ func IsSearchModel(model string) bool {
 
 func IsGLM5Model(model string) bool {
 	baseModel, _, _ := ParseModelName(model)
-	return baseModel == "GLM-5"
+	return baseModel == "GLM-5" || baseModel == "GLM-5.1"
 }
 
 func GetTargetModel(model string) string {

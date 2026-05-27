@@ -1,3 +1,6 @@
 .env
 *.exe
 *.cmd
+.omx/
+node_modules/
+zai-proxy

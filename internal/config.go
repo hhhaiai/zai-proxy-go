@@ -7,7 +7,9 @@ import (
 )
 
 type Config struct {
-	Port string
+	Port               string
+	CaptchaVerifyParam string // 静态 captcha_verify_param
+	CaptchaAPI         string // 动态获取 captcha_verify_param 的 API
 }
 
 var Cfg *Config
@@ -21,6 +23,8 @@ func LoadConfig() {
 	}
 
 	Cfg = &Config{
-		Port: port,
+		Port:               port,
+		CaptchaVerifyParam: os.Getenv("ZAI_CAPTCHA_VERIFY_PARAM"),
+		CaptchaAPI:         os.Getenv("ZAI_CAPTCHA_API"),
 	}
 }

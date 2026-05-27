@@ -1,0 +1,24 @@
+{
+  "name": "zai-proxy-go",
+  "version": "1.0.0",
+  "description": "zai-proxy \u662f\u4e00\u4e2a\u57fa\u4e8e Go \u8bed\u8a00\u7684\u4ee3\u7406\u670d\u52a1\uff0c\u5c06 z.ai \u7f51\u9875\u804a\u5929\u8f6c\u6362\u4e3a OpenAI API \u517c\u5bb9\u683c\u5f0f\u3002\u7528\u6237\u4f7f\u7528\u81ea\u5df1\u7684 z.ai token \u8fdb\u884c\u8c03\u7528\u3002",
+  "main": "captcha_solver.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hhhaiai/zai-proxy-go.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/hhhaiai/zai-proxy-go/issues"
+  },
+  "homepage": "https://github.com/hhhaiai/zai-proxy-go#readme",
+  "dependencies": {
+    "puppeteer-core": "^25.1.0"
+  }
+}
