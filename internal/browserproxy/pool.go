@@ -143,15 +143,55 @@ func createSession(id int) (*Session, error) {
 	err := chromedp.Run(navCtx,
 		chromedp.Navigate(zaiURL),
 		chromedp.WaitReady("body"),
-		chromedp.Sleep(5*time.Second),
-		chromedp.Evaluate(`localStorage.getItem('token') || ''`, &token),
-		chromedp.Evaluate(`document.cookie`, &cookies),
+		chromedp.Sleep(8*time.Second),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("navigate: %w", err)
 	}
+
+	// Debug: check what's in localStorage and cookies
+	var debugInfo string
+	chromedp.Run(navCtx, chromedp.Evaluate(`
+		JSON.stringify({
+			localStorageKeys: Object.keys(localStorage),
+			token: localStorage.getItem('token'),
+			cookie: document.cookie.substring(0, 200),
+			url: window.location.href,
+			title: document.title
+		})
+	`, &debugInfo))
+	log.Printf("[BrowserPool] S%d debug: %s", id, debugInfo)
+
+	// Try to get token from localStorage
+	chromedp.Run(navCtx, chromedp.Evaluate(`localStorage.getItem('token') || ''`, &token))
+	chromedp.Run(navCtx, chromedp.Evaluate(`document.cookie`, &cookies))
+
+	// If no token in localStorage, try to get from cookies
 	if token == "" {
-		return nil, fmt.Errorf("no token found in localStorage")
+		// Parse token from cookies
+		cookieArr := strings.Split(cookies, ";")
+		for _, c := range cookieArr {
+			c = strings.TrimSpace(c)
+			if strings.HasPrefix(c, "token=") {
+				token = strings.TrimPrefix(c, "token=")
+				break
+			}
+		}
+	}
+
+	// If still no token, try to get from page context
+	if token == "" {
+		chromedp.Run(navCtx, chromedp.Evaluate(`
+			// Try various token locations
+			window.__token || 
+			document.querySelector('meta[name="token"]')?.content ||
+			document.querySelector('input[name="token"]')?.value ||
+			''
+		`, &token))
+	}
+
+	if token == "" {
+		return nil, fmt.Errorf("no token found in localStorage, cookies, or page context")
 	}
 
 	log.Printf("[BrowserPool] S%d ready: token=%s..., cookies=%d", id, token[:min(30, len(token))], len(cookies))
@@ -406,6 +446,18 @@ func ChatViaBrowser(userMessage string) (string, error) {
 
 	// Wait for the request to be sent and intercept captcha_verify_param
 	time.Sleep(3 * time.Second)
+
+	// Debug: check if interception was installed and if captcha was captured
+	var debugInfo string
+	chromedp.Run(chatCtx, chromedp.Evaluate(`
+		JSON.stringify({
+			interceptionInstalled: typeof window.fetch.toString().includes('chat.z.ai') || true,
+			hasIntercepted: !!window.__intercepted_captcha,
+			interceptedValue: window.__intercepted_captcha || 'none',
+			fetchOverwritten: window.fetch.toString().substring(0, 100)
+		})
+	`, &debugInfo))
+	log.Printf("[BrowserChat] Debug: %s", debugInfo)
 
 	// Check if we intercepted captcha_verify_param
 	chromedp.Run(chatCtx, chromedp.Evaluate(`
