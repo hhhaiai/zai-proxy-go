@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	bp "zai-proxy/internal/browserproxy"
 	"github.com/corpix/uarand"
 	"github.com/google/uuid"
 )
@@ -158,16 +158,7 @@ func makeUpstreamRequest(token string, messages []Message, model string) (*http.
 
 	LogInfo("[Upstream] Sending request: model=%s, target=%s", model, targetModel)
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			TLSHandshakeTimeout:   15 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
-		},
-	}
+	client := GetSharedHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		LogError("[Upstream] Request error: %v", err)
@@ -1061,59 +1052,81 @@ func HandleModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleBrowserProxyRequest forwards anonymous requests to the browser proxy
+// handleBrowserProxyRequest forwards anonymous requests via the Go chromedp pool.
 func handleBrowserProxyRequest(w http.ResponseWriter, req ChatRequest) {
-	browserProxyURL := "http://localhost:9877/v1/chat/completions"
-
-	// Forward the request to the browser proxy
-	bodyBytes, _ := json.Marshal(req)
-	proxyReq, err := http.NewRequest("POST", browserProxyURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		LogError("[BrowserProxy] Failed to create request: %v", err)
-		http.Error(w, "Browser proxy error", http.StatusBadGateway)
+	if !bp.IsReady() {
+		http.Error(w, "Browser pool not ready, try again later", http.StatusServiceUnavailable)
 		return
 	}
-	proxyReq.Header.Set("Content-Type", "application/json")
 
-	LogInfo("[BrowserProxy] Forwarding anonymous request: model=%s", req.Model)
-
-	client := &http.Client{
-		Timeout: 180 * time.Second, // Browser proxy can be slow (captcha solving)
+	// Extract user message
+	userMsg := ""
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "user" {
+			userMsg, _ = req.Messages[i].ParseContent()
+			break
+		}
 	}
-
-	resp, err := client.Do(proxyReq)
-	if err != nil {
-		LogError("[BrowserProxy] Request failed: %v", err)
-		http.Error(w, "Browser proxy unavailable. Make sure browser_proxy.js is running on port 9877.", http.StatusBadGateway)
+	if userMsg == "" {
+		http.Error(w, "No user message found", http.StatusBadRequest)
 		return
 	}
-	defer resp.Body.Close()
 
-	LogInfo("[BrowserProxy] Response status: %d", resp.StatusCode)
+	LogInfo("[BrowserProxy] Processing: model=%s, pool=%d", req.Model, bp.PoolSize())
 
-	// Forward response headers
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
+	worker := bp.Acquire()
+	defer bp.Release(worker)
+
+	answer, err := bp.ProcessChat(worker, userMsg)
+	if err != nil {
+		LogError("[BrowserProxy] Error: %v", err)
+		http.Error(w, fmt.Sprintf("Browser proxy error: %v", err), http.StatusBadGateway)
+		return
 	}
-	w.WriteHeader(resp.StatusCode)
 
-	// Stream the response
-	flusher, ok := w.(http.Flusher)
-	if ok {
-		buf := make([]byte, 4096)
-		for {
-			n, err := resp.Body.Read(buf)
-			if n > 0 {
-				w.Write(buf[:n])
-				flusher.Flush()
-			}
-			if err != nil {
-				break
-			}
+	LogInfo("[BrowserProxy] Done: %d chars", len(answer))
+
+	completionID := fmt.Sprintf("chatcmpl-%s", uuid.New().String()[:29])
+
+	if req.Stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		flusher, ok := w.(http.Flusher)
+		chunk := ChatCompletionChunk{
+			ID:      completionID,
+			Object:  "chat.completion.chunk",
+			Created: time.Now().Unix(),
+			Model:   req.Model,
+			Choices: []Choice{{
+				Index: 0,
+				Delta: Delta{Content: answer},
+			}},
 		}
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		done := ChatCompletionChunk{
+			ID: completionID, Object: "chat.completion.chunk",
+			Created: time.Now().Unix(), Model: req.Model,
+			Choices: []Choice{{Index: 0, FinishReason: strPtr("stop")}},
+		}
+		dd, _ := json.Marshal(done)
+		fmt.Fprintf(w, "data: %s\n\n", dd)
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		if ok { flusher.Flush() }
 	} else {
-		io.Copy(w, resp.Body)
+		resp := ChatCompletionResponse{
+			ID: completionID, Object: "chat.completion",
+			Created: time.Now().Unix(), Model: req.Model,
+			Choices: []Choice{{
+				Index: 0,
+				Message: &MessageResp{Role: "assistant", Content: answer},
+				FinishReason: strPtr("stop"),
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	}
 }
+
+func strPtr(s string) *string { return &s }

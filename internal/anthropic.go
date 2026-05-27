@@ -2,14 +2,13 @@ package internal
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
+	bp "zai-proxy/internal/browserproxy"
 	"github.com/google/uuid"
 )
 
@@ -188,6 +187,7 @@ func parseAnthropicContent(content interface{}) (text string, imageURLs []string
 
 // resolveAnthropicModel always uses GLM-5.1-thinking-search for Anthropic endpoint
 func resolveAnthropicModel(model string) string {
+	LogInfo("[Anthropic] Model mapping: %s -> GLM-5.1-thinking-search", model)
 	return "GLM-5.1-thinking-search"
 }
 
@@ -763,129 +763,65 @@ func writeAnthropicError(w http.ResponseWriter, statusCode int, errType, message
 }
 
 
-// handleAnthropicViaBrowserProxy routes anonymous Anthropic requests through the browser proxy
-// and converts the OpenAI-format response back to Anthropic format.
+// handleAnthropicViaBrowserProxy routes anonymous Anthropic requests through the Go chromedp pool.
 func handleAnthropicViaBrowserProxy(w http.ResponseWriter, messages []Message, msgID, clientModel string, stream bool, maxTokens int) {
-	// Convert internal messages to OpenAI ChatRequest for browser proxy
-	browserProxyURL := "http://localhost:9877/v1/chat/completions"
-
-	chatReq := ChatRequest{
-		Model:    "GLM-4.7",
-		Messages: messages,
-		Stream:   stream,
+	if !bp.IsReady() {
+		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "Browser pool not ready")
+		return
 	}
 
-	bodyBytes, _ := json.Marshal(chatReq)
-	proxyReq, err := http.NewRequest("POST", browserProxyURL, bytes.NewReader(bodyBytes))
+	// Extract user message
+	userMsg := ""
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			userMsg, _ = messages[i].ParseContent()
+			break
+		}
+	}
+	if userMsg == "" {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "No user message")
+		return
+	}
+
+	LogInfo("[Anthropic/BrowserProxy] Processing, pool=%d", bp.PoolSize())
+
+	worker := bp.Acquire()
+	defer bp.Release(worker)
+
+	answer, err := bp.ProcessChat(worker, userMsg)
 	if err != nil {
-		LogError("[Anthropic/BrowserProxy] Failed to create request: %v", err)
-		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Browser proxy error")
+		LogError("[Anthropic/BrowserProxy] Error: %v", err)
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("Browser proxy: %v", err))
 		return
 	}
-	proxyReq.Header.Set("Content-Type", "application/json")
 
-	LogInfo("[Anthropic/BrowserProxy] Forwarding anonymous request")
-
-	client := &http.Client{Timeout: 180 * time.Second}
-	resp, err := client.Do(proxyReq)
-	if err != nil {
-		LogError("[Anthropic/BrowserProxy] Request failed: %v", err)
-		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Browser proxy unavailable")
-		return
-	}
-	defer resp.Body.Close()
-
-	LogInfo("[Anthropic/BrowserProxy] Response status: %d", resp.StatusCode)
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		LogError("[Anthropic/BrowserProxy] Error: %s", string(body))
-		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Browser proxy error")
-		return
-	}
+	LogInfo("[Anthropic/BrowserProxy] Done: %d chars", len(answer))
 
 	if stream {
-		// For streaming: read SSE from browser proxy, convert to Anthropic SSE
-		handleAnthropicBrowserProxyStream(w, resp.Body, msgID, clientModel)
+		handleAnthropicDirectStream(w, answer, msgID, clientModel)
 	} else {
-		// For non-streaming: read OpenAI JSON, convert to Anthropic JSON
-		handleAnthropicBrowserProxyNonStream(w, resp.Body, msgID, clientModel, maxTokens)
+		handleAnthropicDirectNonStream(w, answer, msgID, clientModel, maxTokens)
 	}
 }
 
-// ensureAnthropicTextBlock starts a text content block for the browser proxy stream path.
-// This is a simplified version of ensureTextBlock (no thinking block support).
-func ensureAnthropicTextBlock(w http.ResponseWriter, flusher http.Flusher, blockIndex *int, textBlockStarted *bool) {
-	if *textBlockStarted {
-		return
-	}
-	idx := *blockIndex
-	sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
-		"type":  "content_block_start",
-		"index": idx,
-		"content_block": map[string]interface{}{
-			"type": "text",
-			"text": "",
-		},
-	})
-	*blockIndex++
-	*textBlockStarted = true
-}
-
-// handleAnthropicBrowserProxyNonStream converts browser proxy OpenAI response to Anthropic format
-func handleAnthropicBrowserProxyNonStream(w http.ResponseWriter, body io.ReadCloser, msgID, clientModel string, maxTokens int) {
-	bodyBytes, err := io.ReadAll(body)
-	if err != nil {
-		LogError("[Anthropic/BrowserProxy] Failed to read response: %v", err)
-		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "Failed to read upstream response")
-		return
-	}
-
-	var openaiResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-
-	if err := json.Unmarshal(bodyBytes, &openaiResp); err != nil {
-		LogError("[Anthropic/BrowserProxy] Failed to parse response: %v, body: %s", err, string(bodyBytes))
-		writeAnthropicError(w, http.StatusInternalServerError, "api_error", "Failed to parse upstream response")
-		return
-	}
-
-	content := ""
-	if len(openaiResp.Choices) > 0 {
-		content = openaiResp.Choices[0].Message.Content
-	}
-
-	if content == "" {
-		LogWarn("[Anthropic/BrowserProxy] Empty content in response")
-	}
-
+// handleAnthropicDirectNonStream wraps a plain-text answer in Anthropic JSON.
+func handleAnthropicDirectNonStream(w http.ResponseWriter, answer, msgID, clientModel string, maxTokens int) {
 	stopReason := "end_turn"
-	outputTokens := len(content) / 4 // rough estimate
-
 	response := AnthropicResponse{
 		ID:      msgID,
 		Type:    "message",
 		Role:    "assistant",
-		Content: []AnthropicContentBlockOut{{Type: "text", Text: content}},
+		Content: []AnthropicContentBlockOut{{Type: "text", Text: answer}},
 		Model:   clientModel,
 		StopReason: &stopReason,
-		Usage: AnthropicUsage{
-			InputTokens:  0,
-			OutputTokens: outputTokens,
-		},
+		Usage: AnthropicUsage{OutputTokens: len(answer) / 4},
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleAnthropicBrowserProxyStream converts browser proxy SSE to Anthropic SSE format
-func handleAnthropicBrowserProxyStream(w http.ResponseWriter, body io.ReadCloser, msgID, clientModel string) {
+// handleAnthropicDirectStream wraps a plain-text answer in Anthropic SSE format.
+func handleAnthropicDirectStream(w http.ResponseWriter, answer, msgID, clientModel string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -896,101 +832,40 @@ func handleAnthropicBrowserProxyStream(w http.ResponseWriter, body io.ReadCloser
 		return
 	}
 
-	// Send message_start
 	sendAnthropicSSE(w, flusher, "message_start", map[string]interface{}{
 		"type": "message_start",
 		"message": map[string]interface{}{
-			"id":            msgID,
-			"type":          "message",
-			"role":          "assistant",
-			"content":       []interface{}{},
-			"model":         clientModel,
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage":         map[string]int{"input_tokens": 0, "output_tokens": 0},
+			"id": msgID, "type": "message", "role": "assistant",
+			"content": []interface{}{}, "model": clientModel,
+			"stop_reason": nil, "stop_sequence": nil,
+			"usage": map[string]int{"input_tokens": 0, "output_tokens": 0},
 		},
 	})
 
-	textBlockIndex := 0
-	textBlockStarted := false
+	idx := 0
+	sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
+		"type": "content_block_start", "index": idx,
+		"content_block": map[string]interface{}{"type": "text", "text": ""},
+	})
 
-	// Read SSE from browser proxy
-	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
+		"type": "content_block_delta", "index": idx,
+		"delta": map[string]interface{}{"type": "text_delta", "text": answer},
+	})
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		payload := strings.TrimPrefix(line, "data: ")
-		if payload == "[DONE]" {
-			break
-		}
+	sendAnthropicSSE(w, flusher, "content_block_stop", map[string]interface{}{
+		"type": "content_block_stop", "index": idx,
+	})
 
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content string `json:"content"`
-				} `json:"delta"`
-				FinishReason *string `json:"finish_reason"`
-			} `json:"choices"`
-		}
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			continue
-		}
-
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-
-		delta := chunk.Choices[0].Delta
-		finishReason := chunk.Choices[0].FinishReason
-
-		if delta.Content != "" {
-			if !textBlockStarted {
-				ensureAnthropicTextBlock(w, flusher, &textBlockIndex, &textBlockStarted)
-			}
-			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
-				"type":  "content_block_delta",
-				"index": textBlockIndex - 1,
-				"delta": map[string]interface{}{
-					"type": "text_delta",
-					"text": delta.Content,
-				},
-			})
-		}
-
-		if finishReason != nil {
-			if !textBlockStarted {
-				ensureAnthropicTextBlock(w, flusher, &textBlockIndex, &textBlockStarted)
-			}
-		}
-	}
-
-	// content_block_stop
-	if textBlockStarted {
-		sendAnthropicSSE(w, flusher, "content_block_stop", map[string]interface{}{
-			"type":  "content_block_stop",
-			"index": textBlockIndex - 1,
-		})
-	}
-
-	// message_delta with stop
 	sendAnthropicSSE(w, flusher, "message_delta", map[string]interface{}{
 		"type": "message_delta",
-		"delta": map[string]interface{}{
-			"stop_reason":   "end_turn",
-			"stop_sequence": nil,
-		},
-		"usage": map[string]int{"output_tokens": 0},
+		"delta": map[string]interface{}{"stop_reason": "end_turn", "stop_sequence": nil},
+		"usage": map[string]int{"output_tokens": len(answer) / 4},
 	})
 
-	// message_stop
-	sendAnthropicSSE(w, flusher, "message_stop", map[string]interface{}{
-		"type": "message_stop",
-	})
+	sendAnthropicSSE(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
 }
+
 
 func HandleModelsAnthropic(w http.ResponseWriter, r *http.Request) {
 	// Return models in a format Claude Code might expect

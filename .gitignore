@@ -4,3 +4,4 @@
 .omx/
 node_modules/
 zai-proxy
+.DS_Store

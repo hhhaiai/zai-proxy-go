@@ -155,8 +155,8 @@ func (tm *TokenManager) initialize() {
 
 // GetNextToken 获取下一个可用Token
 func (tm *TokenManager) GetNextToken() (string, error) {
-	tm.lock.RLock()
-	defer tm.lock.RUnlock()
+	tm.lock.Lock()
+	defer tm.lock.Unlock()
 
 	if len(tm.tokens) == 0 {
 		return "", fmt.Errorf("no available tokens")
