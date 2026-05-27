@@ -13,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"log"
 )
@@ -25,12 +24,13 @@ const (
 	chatTimeout     = 120 * time.Second
 )
 
-// Session holds a token + cookies from a browser session.
+// Session holds a persistent browser tab for fast message processing.
 type Session struct {
-	Token              string
-	Cookies            string
-	CaptchaVerifyParam string
-	Created            time.Time
+	Token   string
+	Cookies string
+	Created time.Time
+	tabCtx  context.Context
+	tabMu   sync.Mutex
 }
 
 // ───────── Session Pool ─────────
@@ -42,6 +42,7 @@ var (
 	sessionsMu     sync.RWMutex
 	poolReady      atomic.Bool
 	activeSessions atomic.Int32
+	sessionIdx     atomic.Int64
 )
 
 func Init(poolSize int) error {
@@ -94,7 +95,7 @@ func Init(poolSize int) error {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			s, err := fetchSession(id)
+			s, err := createSession(id)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -118,16 +119,19 @@ func Init(poolSize int) error {
 	return nil
 }
 
-func fetchSession(id int) (*Session, error) {
-	ctx, cancel := chromedp.NewContext(poolCtx)
+// createSession creates a persistent browser tab with z.ai loaded.
+func createSession(id int) (*Session, error) {
+	// Create a new tab context
+	tabCtx, cancel := chromedp.NewContext(poolCtx)
 	defer cancel()
 
-	navCtx, navCancel := context.WithTimeout(ctx, navigateTimeout)
+	navCtx, navCancel := context.WithTimeout(tabCtx, navigateTimeout)
 	defer navCancel()
 
 	var token string
 	var cookies string
 
+	// Navigate to z.ai and get session info
 	err := chromedp.Run(navCtx,
 		chromedp.Navigate(zaiURL),
 		chromedp.WaitReady("body"),
@@ -142,22 +146,13 @@ func fetchSession(id int) (*Session, error) {
 		return nil, fmt.Errorf("no token found in localStorage")
 	}
 
-	// Attempt captcha solve
-	captchaParam := ""
-	if err := solveCaptcha(ctx); err != nil {
-		log.Printf("[BrowserPool] S%d captcha skipped: %v", id, err)
-	} else if p := getCachedCaptchaParam(); p != "" {
-		captchaParam = p
-	}
-
-	log.Printf("[BrowserPool] S%d ready: token=%s..., cookies=%d, captcha=%v",
-		id, token[:min(30, len(token))], len(cookies), captchaParam != "")
+	log.Printf("[BrowserPool] S%d ready: token=%s..., cookies=%d", id, token[:min(30, len(token))], len(cookies))
 
 	return &Session{
-		Token:              token,
-		Cookies:            cookies,
-		CaptchaVerifyParam: captchaParam,
-		Created:            time.Now(),
+		Token:   token,
+		Cookies: cookies,
+		Created: time.Now(),
+		tabCtx:  tabCtx,
 	}, nil
 }
 
@@ -168,7 +163,7 @@ func refreshLoop() {
 		log.Printf("[BrowserPool] Refreshing sessions...")
 		newSessions := make([]*Session, 0, len(sessions))
 		for i := range sessions {
-			s, err := fetchSession(i)
+			s, err := createSession(i)
 			if err != nil {
 				log.Printf("[BrowserPool] S%d refresh failed: %v", i, err)
 				continue
@@ -186,23 +181,15 @@ func refreshLoop() {
 
 // ───────── Public API ─────────
 
+// GetSession returns a session for API calls (round-robin).
 func GetSession() *Session {
 	sessionsMu.RLock()
 	defer sessionsMu.RUnlock()
 	if len(sessions) == 0 {
 		return nil
 	}
-	for _, s := range sessions {
-		if s.CaptchaVerifyParam != "" && time.Since(s.Created) < 25*time.Minute {
-			return s
-		}
-	}
-	for _, s := range sessions {
-		if time.Since(s.Created) < 25*time.Minute {
-			return s
-		}
-	}
-	return sessions[0]
+	idx := int(sessionIdx.Add(1)) % len(sessions)
+	return sessions[idx]
 }
 
 func PoolSize() int      { return int(activeSessions.Load()) }
@@ -213,320 +200,38 @@ func HandleStatus(w http.ResponseWriter, _ *http.Request) {
 	defer sessionsMu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"ready":       poolReady.Load(),
-		"sessions":    len(sessions),
-		"active":      activeSessions.Load(),
-		"has_captcha": hasCaptchaSession(),
+		"ready":    poolReady.Load(),
+		"sessions": len(sessions),
+		"active":   activeSessions.Load(),
 	})
-}
-
-func hasCaptchaSession() bool {
-	for _, s := range sessions {
-		if s.CaptchaVerifyParam != "" && time.Since(s.Created) < 25*time.Minute {
-			return true
-		}
-	}
-	return false
-}
-
-// ───────── Captcha Solver ─────────
-
-var (
-	cachedCaptchaParam string
-	captchaParamMu     sync.RWMutex
-	captchaParamExpiry time.Time
-)
-
-func getCachedCaptchaParam() string {
-	captchaParamMu.RLock()
-	defer captchaParamMu.RUnlock()
-	if cachedCaptchaParam != "" && time.Now().Before(captchaParamExpiry) {
-		return cachedCaptchaParam
-	}
-	return ""
-}
-
-func setCachedCaptchaParam(param string) {
-	captchaParamMu.Lock()
-	defer captchaParamMu.Unlock()
-	cachedCaptchaParam = param
-	captchaParamExpiry = time.Now().Add(30 * time.Minute)
-}
-
-func solveCaptcha(ctx context.Context) error {
-	// Enable network interception to capture captcha verification
-	chromedp.Run(ctx, network.Enable())
-
-	captchaCtx, cancel := chromedp.NewContext(ctx)
-	defer cancel()
-
-	navCtx, navCancel := context.WithTimeout(captchaCtx, 30*time.Second)
-	defer navCancel()
-
-	err := chromedp.Run(navCtx,
-		chromedp.Navigate(zaiURL),
-		chromedp.WaitReady("body"),
-		chromedp.Sleep(3*time.Second),
-	)
-	if err != nil {
-		return fmt.Errorf("navigate: %w", err)
-	}
-
-	// Check if captcha is present
-	var hasCaptcha bool
-	chromedp.Run(captchaCtx, chromedp.Evaluate(`
-		!!(document.querySelector('#aliyunCaptcha') || 
-		   document.querySelector('[data-aliyun-captcha]') ||
-		   document.querySelector('.captcha-container') ||
-		   document.querySelector('#nc_1_wrapper') ||
-		   document.querySelector('.nc-container'))
-	`, &hasCaptcha))
-
-	if !hasCaptcha {
-		log.Printf("[Captcha] No captcha detected, session pre-authenticated")
-		return nil
-	}
-
-	log.Printf("[Captcha] Captcha detected, attempting to solve...")
-
-	// Find slider element
-	var sliderInfo string
-	findCtx, findCancel := context.WithTimeout(captchaCtx, 10*time.Second)
-	err = chromedp.Run(findCtx, chromedp.Evaluate(`
-		(function() {
-			var selectors = [
-				'#nc_1_n1z', '.nc_iconfont.btn_slide', '.slider',
-				'.btn_slide', '#nc_1__scale_text', '.nc-container .btn_slide',
-				'div[class*="slider"]', 'div[class*="slide"]', 'span[class*="nc"]'
-			];
-			for (var i = 0; i < selectors.length; i++) {
-				var el = document.querySelector(selectors[i]);
-				if (el) {
-					var rect = el.getBoundingClientRect();
-					return JSON.stringify({
-						found: true, selector: selectors[i],
-						x: rect.x, y: rect.y,
-						width: rect.width, height: rect.height
-					});
-				}
-			}
-			var allElements = document.querySelectorAll('*');
-			for (var j = 0; j < allElements.length; j++) {
-				var elem = allElements[j];
-				var style = window.getComputedStyle(elem);
-				if (style.cursor === 'pointer' && 
-					(elem.className.toString().includes('slide') || 
-					 elem.className.toString().includes('drag') ||
-					 elem.className.toString().includes('nc_'))) {
-					var rect = elem.getBoundingClientRect();
-					if (rect.width > 20 && rect.width < 100 && rect.height > 20 && rect.height < 100) {
-						return JSON.stringify({
-							found: true, selector: 'dynamic:' + elem.className,
-							x: rect.x, y: rect.y,
-							width: rect.width, height: rect.height
-						});
-					}
-				}
-			}
-			return JSON.stringify({found: false});
-		})()
-	`, &sliderInfo))
-	findCancel()
-	if err != nil {
-		return fmt.Errorf("find slider: %w", err)
-	}
-
-	var slider map[string]interface{}
-	json.Unmarshal([]byte(sliderInfo), &slider)
-
-	if found, ok := slider["found"].(bool); !ok || !found {
-		return solveCaptchaAlternative(captchaCtx)
-	}
-
-	log.Printf("[Captcha] Found slider: %v", slider)
-
-	// Find gap position
-	var gapInfo string
-	gapCtx, gapCancel := context.WithTimeout(captchaCtx, 10*time.Second)
-	err = chromedp.Run(gapCtx, chromedp.Evaluate(`
-		(function() {
-			var bgSelectors = [
-				'.bg-img', '.captcha-bg', '.puzzle-bg', 
-				'#nc_1__imgCaptcha', '.img-captcha',
-				'div[class*="bg"]', 'canvas'
-			];
-			for (var i = 0; i < bgSelectors.length; i++) {
-				var el = document.querySelector(bgSelectors[i]);
-				if (el) {
-					var rect = el.getBoundingClientRect();
-					var style = window.getComputedStyle(el);
-					var bgImage = style.backgroundImage;
-					if (bgImage && bgImage !== 'none') {
-						return JSON.stringify({
-							found: true, element: bgSelectors[i],
-							x: rect.x, y: rect.y,
-							width: rect.width, height: rect.height,
-							bgImage: bgImage.substring(0, 100)
-						});
-					}
-					if (el.tagName === 'CANVAS') {
-						return JSON.stringify({
-							found: true, element: bgSelectors[i],
-							x: rect.x, y: rect.y,
-							width: rect.width, height: rect.height,
-							isCanvas: true
-						});
-					}
-				}
-			}
-			var allDivs = document.querySelectorAll('div, img, canvas');
-			for (var j = 0; j < allDivs.length; j++) {
-				var elem = allDivs[j];
-				var cls = (elem.className || '').toString();
-				if (cls.includes('captcha') || cls.includes('puzzle') || cls.includes('slide')) {
-					var rect = elem.getBoundingClientRect();
-					if (rect.width > 100 && rect.height > 50) {
-						return JSON.stringify({
-							found: true, element: 'dynamic:' + cls,
-							x: rect.x, y: rect.y,
-							width: rect.width, height: rect.height
-						});
-					}
-				}
-			}
-			return JSON.stringify({found: false});
-		})()
-	`, &gapInfo))
-	gapCancel()
-	if err != nil {
-		return fmt.Errorf("find gap: %w", err)
-	}
-
-	var gap map[string]interface{}
-	json.Unmarshal([]byte(gapInfo), &gap)
-	log.Printf("[Captcha] Gap info: %v", gap)
-
-	// Calculate slide parameters
-	sliderX, _ := slider["x"].(float64)
-	sliderY, _ := slider["y"].(float64)
-	sliderW, _ := slider["width"].(float64)
-	sliderH, _ := slider["height"].(float64)
-
-	startX := sliderX + sliderW/2
-	startY := sliderY + sliderH/2
-
-	var slideDistance float64 = 200
-	if found, ok := gap["found"].(bool); ok && found {
-		gapW, _ := gap["width"].(float64)
-		if gapW > 0 {
-			slideDistance = gapW * 0.6
-		}
-	}
-	endX := startX + slideDistance
-
-	log.Printf("[Captcha] Sliding (%.1f,%.1f) -> (%.1f,%.1f)", startX, startY, endX, startY)
-
-	// Perform slide via JavaScript mouse events
-	slideCtx, slideCancel := context.WithTimeout(captchaCtx, 15*time.Second)
-	var slideOK bool
-	err = chromedp.Run(slideCtx, chromedp.Evaluate(fmt.Sprintf(`
-		(function() {
-			var startX = %.1f, startY = %.1f, endX = %.1f;
-			var steps = 30;
-			function mouseEvent(type, x, y) {
-				var el = document.elementFromPoint(x, y) || document.body;
-				el.dispatchEvent(new MouseEvent(type, {
-					bubbles: true, cancelable: true,
-					clientX: x, clientY: y, button: 0,
-					buttons: type === 'mouseup' ? 0 : 1
-				}));
-			}
-			var points = [];
-			for (var i = 0; i <= steps; i++) {
-				var p = i / steps;
-				var ease = p < 0.5 ? 2*p*p : 1 - Math.pow(-2*p+2,2)/2;
-				points.push({
-					x: startX + (endX-startX)*ease,
-					y: startY + (Math.random()-0.5)*3
-				});
-			}
-			mouseEvent('mousedown', startX, startY);
-			for (var j = 0; j < points.length; j++) {
-				(function(pt, d){
-					setTimeout(function(){ mouseEvent('mousemove', pt.x, pt.y); }, d);
-				})(points[j], j*20);
-			}
-			setTimeout(function(){ mouseEvent('mouseup', endX, startY); }, (points.length+1)*20);
-			return true;
-		})()
-	`, startX, startY, endX), &slideOK))
-	slideCancel()
-	if err != nil {
-		return fmt.Errorf("slide: %w", err)
-	}
-
-	time.Sleep(3 * time.Second)
-
-	// Check if solved
-	var solved bool
-	chromedp.Run(captchaCtx, chromedp.Evaluate(`
-		!!(document.querySelector('.captcha-success') || 
-		   document.querySelector('[data-captcha-success]') ||
-		   !document.querySelector('#aliyunCaptcha'))
-	`, &solved))
-
-	if solved {
-		log.Printf("[Captcha] Captcha solved!")
-		var param string
-		chromedp.Run(captchaCtx, chromedp.Evaluate(`window.__captcha_verify_param || ''`, &param))
-		if param != "" {
-			setCachedCaptchaParam(param)
-		}
-		return nil
-	}
-
-	return solveCaptchaAlternative(captchaCtx)
-}
-
-func solveCaptchaAlternative(ctx context.Context) error {
-	var hasClickCaptcha bool
-	chromedp.Run(ctx, chromedp.Evaluate(`
-		!!(document.querySelector('.click-captcha') || 
-		   document.querySelector('.verify-btn') ||
-		   document.querySelector('.captcha-verify-btn'))
-	`, &hasClickCaptcha))
-
-	if hasClickCaptcha {
-		log.Printf("[Captcha] Trying click captcha...")
-		clickCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := chromedp.Run(clickCtx,
-			chromedp.Click(".click-captcha, .verify-btn, .captcha-verify-btn", chromedp.ByQuery),
-			chromedp.Sleep(3*time.Second),
-		)
-		cancel()
-		if err == nil {
-			log.Printf("[Captcha] Click captcha solved!")
-			return nil
-		}
-	}
-
-	log.Printf("[Captcha] Automated solving failed, will use browser chat fallback")
-	return fmt.Errorf("captcha solving not fully automated")
 }
 
 // ───────── Chat via Browser ─────────
 
+// ChatViaBrowser sends a message through the browser and returns the response.
 func ChatViaBrowser(userMessage string) (string, error) {
 	if !poolReady.Load() {
 		return "", fmt.Errorf("browser pool not ready")
 	}
 
-	ctx, cancel := chromedp.NewContext(poolCtx)
+	// Get a session
+	session := GetSession()
+	if session == nil {
+		return "", fmt.Errorf("no available session")
+	}
+
+	// Lock the session to prevent concurrent use
+	session.tabMu.Lock()
+	defer session.tabMu.Unlock()
+
+	// Create a new tab for this request (faster than reusing)
+	tabCtx, cancel := chromedp.NewContext(poolCtx)
 	defer cancel()
 
-	chatCtx, chatCancel := context.WithTimeout(ctx, chatTimeout)
+	chatCtx, chatCancel := context.WithTimeout(tabCtx, chatTimeout)
 	defer chatCancel()
 
+	// Navigate to z.ai
 	err := chromedp.Run(chatCtx,
 		chromedp.Navigate(zaiURL),
 		chromedp.WaitReady("body"),
@@ -544,10 +249,28 @@ func ChatViaBrowser(userMessage string) (string, error) {
 		chromedp.Evaluate(fmt.Sprintf(`
 			(function() {
 				var msg = %q;
+				
+				// Find the input element - try multiple selectors
 				var input = document.querySelector('textarea') || 
 				            document.querySelector('div[contenteditable="true"]') ||
 				            document.querySelector('input[type="text"]');
+				
+				if (!input) {
+					// Try harder to find input
+					var allInputs = document.querySelectorAll('textarea, input, [contenteditable]');
+					for (var i = 0; i < allInputs.length; i++) {
+						var el = allInputs[i];
+						var rect = el.getBoundingClientRect();
+						if (rect.width > 50 && rect.height > 20 && rect.top > 0) {
+							input = el;
+							break;
+						}
+					}
+				}
+				
 				if (!input) return 'no-input-found';
+				
+				// Set the value
 				if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
 					input.value = msg;
 					input.dispatchEvent(new Event('input', {bubbles: true}));
@@ -556,8 +279,8 @@ func ChatViaBrowser(userMessage string) (string, error) {
 					input.textContent = msg;
 					input.dispatchEvent(new Event('input', {bubbles: true}));
 				}
+				
 				input.focus();
-				input.click();
 				return 'typed';
 			})()
 		`, userMessage), &typeResult),
@@ -570,7 +293,7 @@ func ChatViaBrowser(userMessage string) (string, error) {
 		return "", fmt.Errorf("could not type: %s", typeResult)
 	}
 
-	// Send message
+	// Send message by pressing Enter or clicking send button
 	var sendResult string
 	sendCtx, sendCancel := context.WithTimeout(chatCtx, 5*time.Second)
 	chromedp.Run(sendCtx, chromedp.Evaluate(`
@@ -579,16 +302,25 @@ func ChatViaBrowser(userMessage string) (string, error) {
 			            document.querySelector('div[contenteditable="true"]') ||
 			            document.querySelector('input[type="text"]');
 			if (!input) return 'no-input';
+			
+			// Try Enter key
 			input.dispatchEvent(new KeyboardEvent('keydown', {
 				key:'Enter', code:'Enter', keyCode:13, which:13,
 				bubbles:true, cancelable:true
 			}));
-			var btns = document.querySelectorAll(
-				'button[class*="send"], button[class*="submit"], ' +
-				'[class*="send-btn"], button[aria-label*="send"], button[aria-label*="Send"]'
-			);
+			
+			// Also try clicking send button
+			var btns = document.querySelectorAll('button');
 			for (var i = 0; i < btns.length; i++) {
-				if (btns[i].offsetParent !== null) { btns[i].click(); return 'clicked'; }
+				var btn = btns[i];
+				var text = (btn.textContent || '').toLowerCase();
+				var ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+				if (text.includes('send') || text.includes('发送') || 
+				    ariaLabel.includes('send') || ariaLabel.includes('发送') ||
+				    btn.querySelector('svg')) {
+					btn.click();
+					return 'clicked-send';
+				}
 			}
 			return 'enter';
 		})()

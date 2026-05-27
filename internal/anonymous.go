@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,13 +15,6 @@ import (
 type AnonymousAuthResponse struct {
 	Token string `json:"token"`
 }
-
-// Cached captcha verification param
-var (
-	cachedCaptchaParam string
-	captchaParamLock   sync.RWMutex
-	captchaParamExpiry time.Time
-)
 
 // GetAnonymousToken 从 z.ai 获取匿名 token
 func GetAnonymousToken() (string, error) {
@@ -59,14 +51,15 @@ func GetAnonymousToken() (string, error) {
 	return authResp.Token, nil
 }
 
+// Cached captcha verification param (not used in auto mode)
+var (
+	cachedCaptchaParam string
+	captchaParamLock   sync.RWMutex
+	captchaParamExpiry time.Time
+)
+
 // GetCaptchaVerifyParam 获取验证码验证参数
 func GetCaptchaVerifyParam() (string, error) {
-	// First try browserproxy session
-	if session := bp.GetSession(); session != nil && session.CaptchaVerifyParam != "" {
-		return session.CaptchaVerifyParam, nil
-	}
-
-	// Check local cache
 	captchaParamLock.RLock()
 	if cachedCaptchaParam != "" && time.Now().Before(captchaParamExpiry) {
 		param := cachedCaptchaParam
@@ -75,7 +68,6 @@ func GetCaptchaVerifyParam() (string, error) {
 	}
 	captchaParamLock.RUnlock()
 
-	// If configured via env, use that
 	if Cfg != nil && Cfg.CaptchaVerifyParam != "" {
 		return Cfg.CaptchaVerifyParam, nil
 	}
@@ -92,19 +84,7 @@ func SetCaptchaVerifyParam(param string) {
 	LogInfo("[Captcha] Captcha verify param updated, expires in 30 minutes")
 }
 
-// BuildCaptchaVerifyParam 构建 captcha_verify_param (base64 encoded JSON)
-func BuildCaptchaVerifyParam(certifyID, sceneID, securityToken string) string {
-	param := map[string]interface{}{
-		"certifyId":     certifyID,
-		"sceneId":       sceneID,
-		"isSign":        true,
-		"securityToken": securityToken,
-	}
-	data, _ := json.Marshal(param)
-	return base64.StdEncoding.EncodeToString(data)
-}
-
-// CaptchaSession holds a token + captcha pair from the same browser session.
+// CaptchaSession holds a token + captcha pair.
 type CaptchaSession struct {
 	Token              string
 	CaptchaVerifyParam string
@@ -112,16 +92,15 @@ type CaptchaSession struct {
 	SolvedAt           time.Time
 }
 
-// GetCaptchaSession returns the browserproxy session as a CaptchaSession.
+// GetCaptchaSession returns a session from the browser proxy pool.
 func GetCaptchaSession() *CaptchaSession {
 	session := bp.GetSession()
 	if session == nil {
 		return nil
 	}
 	return &CaptchaSession{
-		Token:              session.Token,
-		CaptchaVerifyParam: session.CaptchaVerifyParam,
-		Cookies:            session.Cookies,
-		SolvedAt:           session.Created,
+		Token:   session.Token,
+		Cookies: session.Cookies,
+		SolvedAt: session.Created,
 	}
 }
