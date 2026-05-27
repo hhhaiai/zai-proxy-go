@@ -369,10 +369,17 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	isGLM5 := IsGLM5Model(req.Model)
 
-	// For anonymous mode: use Puppeteer browser (handles captcha automatically)
+	// For anonymous mode: try direct API with browser session first
 	if isAnonymous {
-		handlePuppeteerRequest(w, req)
-		return
+		session := bp.GetSession()
+		if session != nil && session.Token != "" {
+			token = session.Token
+			LogInfo("[Anonymous] Using browser session token for direct API call")
+		} else {
+			LogInfo("[Anonymous] No browser session available, using browser proxy fallback")
+			handleBrowserProxyRequest(w, req)
+			return
+		}
 	}
 
 	resp, modelName, err := makeUpstreamRequest(token, req.Messages, req.Model)
@@ -412,6 +419,32 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	completionID := fmt.Sprintf("chatcmpl-%s", uuid.New().String()[:29])
+
+	// For anonymous mode: check if captcha is required before streaming
+	if isAnonymous {
+		// Read first line to check for captcha error
+		bufReader := bufio.NewReaderSize(resp.Body, 1024*1024)
+		firstLine, err := bufReader.ReadString('\n')
+		if err == nil && firstLine != "" {
+			if strings.Contains(firstLine, "FRONTEND_CAPTCHA_REQUIRED") {
+				LogInfo("[Upstream] Captcha required, falling back to browser proxy")
+				resp.Body.Close()
+				handleBrowserProxyRequest(w, req)
+				return
+			}
+			// If no captcha error, create a new reader that includes the first line
+			combined := io.MultiReader(
+				strings.NewReader(firstLine),
+				bufReader,
+			)
+			if req.Stream {
+				handleStreamResponse(w, io.NopCloser(combined), completionID, modelName, isGLM5)
+			} else {
+				handleNonStreamResponse(w, io.NopCloser(combined), completionID, modelName, isGLM5)
+			}
+			return
+		}
+	}
 
 	if req.Stream {
 		handleStreamResponse(w, resp.Body, completionID, modelName, isGLM5)
@@ -1058,14 +1091,13 @@ func HandleModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleBrowserProxyRequest forwards anonymous requests via the Go chromedp pool.
+// handleBrowserProxyRequest uses chromedp browser to handle anonymous requests.
 func handleBrowserProxyRequest(w http.ResponseWriter, req ChatRequest) {
 	if !bp.IsReady() {
 		http.Error(w, "Browser pool not ready, try again later", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Extract user message
 	userMsg := ""
 	for i := len(req.Messages) - 1; i >= 0; i-- {
 		if req.Messages[i].Role == "user" {
@@ -1078,12 +1110,9 @@ func handleBrowserProxyRequest(w http.ResponseWriter, req ChatRequest) {
 		return
 	}
 
-	LogInfo("[BrowserProxy] Processing: model=%s, pool=%d", req.Model, bp.PoolSize())
+	LogInfo("[BrowserProxy] Processing: model=%s, msg=%s", req.Model, userMsg[:min(50, len(userMsg))])
 
-	worker := bp.Acquire()
-	defer bp.Release(worker)
-
-	answer, err := bp.ProcessChat(worker, userMsg)
+	answer, err := bp.ChatViaBrowser(userMsg)
 	if err != nil {
 		LogError("[BrowserProxy] Error: %v", err)
 		http.Error(w, fmt.Sprintf("Browser proxy error: %v", err), http.StatusBadGateway)
@@ -1100,14 +1129,9 @@ func handleBrowserProxyRequest(w http.ResponseWriter, req ChatRequest) {
 		w.Header().Set("Connection", "keep-alive")
 		flusher, ok := w.(http.Flusher)
 		chunk := ChatCompletionChunk{
-			ID:      completionID,
-			Object:  "chat.completion.chunk",
-			Created: time.Now().Unix(),
-			Model:   req.Model,
-			Choices: []Choice{{
-				Index: 0,
-				Delta: Delta{Content: answer},
-			}},
+			ID: completionID, Object: "chat.completion.chunk",
+			Created: time.Now().Unix(), Model: req.Model,
+			Choices: []Choice{{Index: 0, Delta: Delta{Content: answer}}},
 		}
 		data, _ := json.Marshal(chunk)
 		fmt.Fprintf(w, "data: %s\n\n", data)
@@ -1125,8 +1149,7 @@ func handleBrowserProxyRequest(w http.ResponseWriter, req ChatRequest) {
 			ID: completionID, Object: "chat.completion",
 			Created: time.Now().Unix(), Model: req.Model,
 			Choices: []Choice{{
-				Index: 0,
-				Message: &MessageResp{Role: "assistant", Content: answer},
+				Index: 0, Message: &MessageResp{Role: "assistant", Content: answer},
 				FinishReason: strPtr("stop"),
 			}},
 		}
@@ -1137,72 +1160,3 @@ func handleBrowserProxyRequest(w http.ResponseWriter, req ChatRequest) {
 
 func strPtr(s string) *string { return &s }
 
-// handlePuppeteerRequest uses the Puppeteer captcha_solver.js to send messages
-// through the browser UI. The browser handles captcha automatically.
-func handlePuppeteerRequest(w http.ResponseWriter, req ChatRequest) {
-	// Extract user message
-	userMsg := ""
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			userMsg, _ = req.Messages[i].ParseContent()
-			break
-		}
-	}
-	if userMsg == "" {
-		http.Error(w, "No user message found", http.StatusBadRequest)
-		return
-	}
-
-	LogInfo("[Puppeteer] Processing: model=%s, msg=%s", req.Model, userMsg[:min(50, len(userMsg))])
-
-	answer, _, err := RunPuppeteerChat(userMsg)
-	if err != nil {
-		LogError("[Puppeteer] Error: %v", err)
-		http.Error(w, "Puppeteer error: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-
-	LogInfo("[Puppeteer] Done: %d chars", len(answer))
-
-	completionID := fmt.Sprintf("chatcmpl-%s", uuid.New().String()[:29])
-
-	if req.Stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		flusher, ok := w.(http.Flusher)
-		chunk := ChatCompletionChunk{
-			ID:      completionID,
-			Object:  "chat.completion.chunk",
-			Created: time.Now().Unix(),
-			Model:   req.Model,
-			Choices: []Choice{{
-				Index: 0,
-				Delta: Delta{Content: answer},
-			}},
-		}
-		data, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		done := ChatCompletionChunk{
-			ID: completionID, Object: "chat.completion.chunk",
-			Created: time.Now().Unix(), Model: req.Model,
-			Choices: []Choice{{Index: 0, FinishReason: strPtr("stop")}},
-		}
-		dd, _ := json.Marshal(done)
-		fmt.Fprintf(w, "data: %s\n\n", dd)
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		if ok { flusher.Flush() }
-	} else {
-		resp := ChatCompletionResponse{
-			ID: completionID, Object: "chat.completion",
-			Created: time.Now().Unix(), Model: req.Model,
-			Choices: []Choice{{
-				Index: 0,
-				Message: &MessageResp{Role: "assistant", Content: answer},
-				FinishReason: strPtr("stop"),
-			}},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
-	}
-}

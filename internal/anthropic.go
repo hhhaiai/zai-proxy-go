@@ -249,11 +249,17 @@ func HandleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	msgID := fmt.Sprintf("msg_%s", uuid.New().String()[:24])
 
-	// For anonymous mode: use Puppeteer browser (handles captcha automatically)
+	// For anonymous mode: try direct API with browser session first
 	if isAnonymous {
-		LogInfo("[Anthropic] Anonymous mode, using Puppeteer")
-		handleAnthropicViaPuppeteer(w, messages, msgID, clientModel, req.Stream, req.MaxTokens)
-		return
+		session := bp.GetSession()
+		if session != nil && session.Token != "" {
+			token = session.Token
+			LogInfo("[Anthropic] Using browser session token for direct API call")
+		} else {
+			LogInfo("[Anthropic] No browser session, using browser proxy fallback")
+			handleAnthropicViaBrowserProxy(w, messages, msgID, clientModel, req.Stream, req.MaxTokens)
+			return
+		}
 	}
 
 	// Make upstream request (reuse existing logic)
@@ -763,14 +769,13 @@ func writeAnthropicError(w http.ResponseWriter, statusCode int, errType, message
 }
 
 
-// handleAnthropicViaBrowserProxy routes anonymous Anthropic requests through the Go chromedp pool.
+// handleAnthropicViaBrowserProxy routes anonymous Anthropic requests through chromedp.
 func handleAnthropicViaBrowserProxy(w http.ResponseWriter, messages []Message, msgID, clientModel string, stream bool, maxTokens int) {
 	if !bp.IsReady() {
 		writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "Browser pool not ready")
 		return
 	}
 
-	// Extract user message
 	userMsg := ""
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == "user" {
@@ -783,12 +788,9 @@ func handleAnthropicViaBrowserProxy(w http.ResponseWriter, messages []Message, m
 		return
 	}
 
-	LogInfo("[Anthropic/BrowserProxy] Processing, pool=%d", bp.PoolSize())
+	LogInfo("[Anthropic/BrowserProxy] Processing, msg=%s", userMsg[:min(50, len(userMsg))])
 
-	worker := bp.Acquire()
-	defer bp.Release(worker)
-
-	answer, err := bp.ProcessChat(worker, userMsg)
+	answer, err := bp.ChatViaBrowser(userMsg)
 	if err != nil {
 		LogError("[Anthropic/BrowserProxy] Error: %v", err)
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("Browser proxy: %v", err))
@@ -872,34 +874,3 @@ func HandleModelsAnthropic(w http.ResponseWriter, r *http.Request) {
 	HandleModels(w, r)
 }
 
-// handleAnthropicViaPuppeteer uses Puppeteer for anonymous Anthropic requests.
-func handleAnthropicViaPuppeteer(w http.ResponseWriter, messages []Message, msgID, clientModel string, stream bool, maxTokens int) {
-	userMsg := ""
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
-			userMsg, _ = messages[i].ParseContent()
-			break
-		}
-	}
-	if userMsg == "" {
-		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "No user message")
-		return
-	}
-
-	LogInfo("[Anthropic/Puppeteer] Processing, msg=%s", userMsg[:min(50, len(userMsg))])
-
-	answer, _, err := RunPuppeteerChat(userMsg)
-	if err != nil {
-		LogError("[Anthropic/Puppeteer] Error: %v", err)
-		writeAnthropicError(w, http.StatusBadGateway, "api_error", "Puppeteer failed: "+err.Error())
-		return
-	}
-
-	LogInfo("[Anthropic/Puppeteer] Done: %d chars", len(answer))
-
-	if stream {
-		handleAnthropicDirectStream(w, answer, msgID, clientModel)
-	} else {
-		handleAnthropicDirectNonStream(w, answer, msgID, clientModel, maxTokens)
-	}
-}

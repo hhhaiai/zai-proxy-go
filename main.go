@@ -19,8 +19,8 @@ func main() {
 	// Token manager
 	_ = internal.GetTokenManager()
 
-	// ── Browser proxy pool (Go chromedp) ──
-	poolSize := 10
+	// ── Browser proxy pool (Go chromedp) — for anonymous mode ──
+	poolSize := 2
 	if v := os.Getenv("BROWSER_POOL_SIZE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			poolSize = n
@@ -30,15 +30,9 @@ func main() {
 	go func() {
 		if err := bp.Init(poolSize); err != nil {
 			internal.LogError("[BrowserPool] Init failed: %v (anonymous mode disabled)", err)
+			internal.LogInfo("[BrowserPool] Hint: install chromium or set CHROME_PATH")
 		}
 	}()
-
-	// ── Auto captcha solve (disabled — browser proxy handles captcha natively) ──
-	// go func() {
-	// 	time.Sleep(3 * time.Second)
-	// 	internal.AutoSolveCaptcha()
-	// 	internal.StartCaptchaRefresh()
-	// }()
 
 	// ── Routes ──
 	http.HandleFunc("/v1/models", internal.HandleModels)
@@ -51,10 +45,7 @@ func main() {
 	http.HandleFunc("/v1/tokens/add", internal.HandleTokenAdd)
 	http.HandleFunc("/v1/tokens/stats", internal.HandleTokenStats)
 
-	// Captcha
-	http.HandleFunc("/captcha", internal.HandleCaptchaPage)
-	http.HandleFunc("/captcha/verify", internal.HandleCaptchaVerify)
-	http.HandleFunc("/captcha/status", internal.HandleCaptchaStatus)
+	// Captcha (for manual fallback)
 
 	// Browser pool status
 	http.HandleFunc("/browser/status", bp.HandleStatus)
@@ -71,7 +62,7 @@ func main() {
 		ReadTimeout:       300 * time.Second,
 		WriteTimeout:      300 * time.Second,
 		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 20, // 1 MB
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	if err := server.ListenAndServe(); err != nil {

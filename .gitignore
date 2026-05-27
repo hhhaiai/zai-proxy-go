@@ -5,3 +5,5 @@
 node_modules/
 zai-proxy
 .DS_Store
+*.log
+tmp/
